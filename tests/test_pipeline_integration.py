@@ -91,8 +91,8 @@ def test_full_pipeline_routes_and_audits(
     stages = {t.stage for t in m.stage_timings}
     assert stages == {"parse", "canonical", "cleanse", "match"}
 
-    # Only the SASID rule applies to RIDE's data (no SSN/DOB/address mapped).
-    assert m.matched_on == ["SASID"]
+    # Only the external-id rule applies to RIDE's data (no SSN/DOB/address mapped).
+    assert m.matched_on == ["External ID"]
 
 
 def test_skip_if_null_drops_rows(

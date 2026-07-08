@@ -84,17 +84,18 @@ class InMemoryRepository(Repository):
         self.stage_updates.extend(dict(u) for u in updates)
         return len(updates)
 
-    def load_reference(self) -> list[dict[str, Any]]:
+    def load_reference(self, external_id_column: str | None = None) -> list[dict[str, Any]]:
         """Same backing list as load_member_universe — this test double has
         no separate rilds_reference concept; the orchestrator now calls this
         one, so the ``members`` fixture data must be reachable through it.
-        Mirrors PostgresRepository.load_reference()'s sasid -> member_external_id
-        aliasing so fixtures shaped like real rilds_reference rows (sasid, not
-        member_external_id) work the same way here as in production."""
+        Mirrors PostgresRepository.load_reference()'s external_id_column ->
+        rilds_id aliasing so fixtures shaped like real rilds_reference rows
+        (e.g. sasid, not rilds_id) work the same way here as in production."""
         candidates = []
         for m in self.members:
             d = dict(m)
-            d.setdefault("member_external_id", d.get("sasid"))
+            if external_id_column is not None:
+                d.setdefault("rilds_id", d.get(external_id_column))
             candidates.append(d)
         return candidates
 

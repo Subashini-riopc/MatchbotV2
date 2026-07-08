@@ -242,7 +242,7 @@ class PostgresRepository(Repository):
         return len(params)
 
     # --- rilds_reference (active matching source) ---------------------------
-    def load_reference(self) -> list[dict[str, Any]]:
+    def load_reference(self, external_id_column: str | None = None) -> list[dict[str, Any]]:
         """Load candidate rows from ``rilds_reference`` for matching.
 
         ``rilds_reference`` is populated externally (not by this pipeline —
@@ -250,9 +250,18 @@ class PostgresRepository(Repository):
         as ``load_member_universe`` was. Its own column names
         (``first_name_metaphone1``/``last_name_metaphone1``/``idcol_id``) are
         the source of truth and match STAGE's derived columns directly — no
-        aliasing needed there. ``sasid`` is exposed additionally as
-        ``member_external_id`` since that's the canonical attribute name the
-        matcher chain (``deterministic_external_id``) is configured against.
+        aliasing needed there.
+
+        ``external_id_column`` is the current provider's
+        ``ProviderConfig.external_id_column`` (e.g. ``"sasid"``, ``"ccri_id"``)
+        — the one ``rilds_reference`` column that provider's generic
+        ``rilds_id`` should be compared against. Exposed here as
+        ``rilds_id`` on every candidate row so the ``deterministic_external_id``
+        matcher can compare stage's ``rilds_id`` to reference's ``rilds_id``
+        using the same key name on both sides, without needing to know which
+        agency issued it. ``None`` (a provider that doesn't map
+        ``member_external_id`` at all) leaves candidates without a
+        ``rilds_id`` key, which the matcher already treats as a harmless skip.
 
         Deliberately uses ``self._engine`` (the main connection), not
         ``self._mu_engine`` — that engine follows ``MEMBER_UNIVERSE_URL``,
@@ -267,7 +276,8 @@ class PostgresRepository(Repository):
         candidates = []
         for r in rows:
             d = self._coerce(dict(r))
-            d["member_external_id"] = d.get("sasid")
+            if external_id_column is not None:
+                d["rilds_id"] = d.get(external_id_column)
             candidates.append(d)
         log.info("rilds_reference.loaded", count=len(candidates))
         return candidates
@@ -282,8 +292,8 @@ class PostgresRepository(Repository):
         for r in rows:
             d = self._coerce(dict(r))
             # Expose the generic canonical id the matchers key on, sourced from
-            # the provider-specific sasid/lasid column.
-            d["member_external_id"] = d.get("sasid") or d.get("lasid")
+            # the generic rilds_id column (or legacy lasid).
+            d["member_external_id"] = d.get("rilds_id") or d.get("lasid")
             members.append(d)
         log.info("member_universe.loaded", count=len(members))
         return members
@@ -303,9 +313,9 @@ class PostgresRepository(Repository):
         cleaned = []
         for r in df.to_dicts():
             row = {k: v for k, v in r.items() if k in valid}
-            # Map the generic external id onto the provider-specific sasid column.
-            if r.get("member_external_id") is not None and not row.get("sasid"):
-                row["sasid"] = r["member_external_id"]
+            # Map the generic external id onto the generic rilds_id column.
+            if r.get("member_external_id") is not None and not row.get("rilds_id"):
+                row["rilds_id"] = r["member_external_id"]
             cleaned.append(row)
         with self._engine.begin() as conn:
             conn.execute(search_path_sql(self._schema))

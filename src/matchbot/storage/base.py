@@ -9,7 +9,7 @@ The run lifecycle the orchestrator drives:
     pipeline_run_id = begin_run(...)
     write_land(...)                       # raw cleansed rows, full fidelity
     stage_ids = write_stage(...)          # canonical + blocking cols, PENDING
-    candidates = load_reference()         # rilds_reference — the matching source
+    candidates = load_reference(ext_col) # rilds_reference — the matching source
     ... match in Python ...
     update_stage_matches(...)             # set idcol_id/score/status in place
     write_target(...) / write_error(...)
@@ -79,10 +79,15 @@ class Repository(ABC):
         """
 
     @abstractmethod
-    def load_reference(self) -> list[dict[str, Any]]:
+    def load_reference(self, external_id_column: str | None = None) -> list[dict[str, Any]]:
         """Return the rilds_reference rows (read-only, populated externally).
 
         The active matching source — see person_pii_reference_temp_tables.md.
+        ``external_id_column`` is the calling provider's
+        ``ProviderConfig.external_id_column`` (e.g. ``"sasid"``); each
+        candidate row is given a ``rilds_id`` key sourced from that column so
+        it can be compared against stage's generic ``rilds_id`` regardless of
+        which agency issued it.
         """
 
     @abstractmethod

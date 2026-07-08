@@ -91,11 +91,15 @@ class CleanseStage:
             )
         df = self._add_derived(df, std)
 
-        # Populate the provider-specific `sasid` column from the canonical
+        # Populate the generic `rilds_id` column from the canonical
         # `member_external_id` so stage, matching, and the denormalized
-        # target/error attributes all carry it consistently.
-        if "member_external_id" in df.columns and "sasid" not in df.columns:
-            df = df.with_columns(pl.col("member_external_id").alias("sasid"))
+        # target/error attributes all carry it consistently, regardless of
+        # which agency issued the id (SASID, CCRI id, ...). Which
+        # rilds_reference column rilds_id is actually compared against is
+        # resolved per-provider (see ProviderConfig.external_id_column), not
+        # here.
+        if "member_external_id" in df.columns and "rilds_id" not in df.columns:
+            df = df.with_columns(pl.col("member_external_id").alias("rilds_id"))
 
         # 3. skip_if_null DQ gate.
         skipped = 0

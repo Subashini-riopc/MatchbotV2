@@ -234,7 +234,7 @@ class Orchestrator:
         chosen = filter_chain_by_provider_attributes(chosen, mapped_attributes)
         matchers = build_matchers(chosen, g.standardization)
         metrics.matched_on = matched_on_attributes(chosen)
-        candidates = self._repo.load_reference()
+        candidates = self._repo.load_reference(provider.external_id_column)
         metrics.reference_row_count = len(candidates)
         index = blocking.index_members(candidates, keys)
 
@@ -268,7 +268,7 @@ class Orchestrator:
     def _stage_rows(frame: pl.DataFrame, provider: ProviderConfig) -> list[dict[str, Any]]:
         """Project the cleansed frame to stage-table columns.
 
-        The cleanse stage already populates ``sasid`` from the canonical
+        The cleanse stage already populates ``rilds_id`` from the canonical
         ``member_external_id``; here we only add the per-run tracking columns.
         """
         rows: list[dict[str, Any]] = []

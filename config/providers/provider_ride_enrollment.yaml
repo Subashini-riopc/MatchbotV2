@@ -2,12 +2,16 @@
 # This file is the ENTIRE onboarding surface for this provider.
 #
 # Note: this source has NO SSN and NO DOB. The strong person key is SASID,
-# mapped to canonical `member_external_id`. Matching uses the global default
-# chain (config/global.yaml) unmodified — no provider-level override needed:
-# every rule after deterministic_external_id requires ssn/birth_date/address1,
-# none of which RIDE maps, so those rules skip for every record here. Only
-# deterministic_external_id (SASID) ever actually applies to this provider's
-# data today.
+# mapped to canonical `member_external_id` (carried generically on
+# rilds_stage as `rilds_id`). `external_id_column: sasid` below tells the
+# matcher which rilds_reference column to compare rilds_id against — a
+# future provider whose strong id is e.g. a CCRI id would set
+# `external_id_column: ccri_id` instead, with no code change. Matching uses
+# the global default chain (config/global.yaml) unmodified — no provider-
+# level override needed: every rule after deterministic_external_id requires
+# ssn/birth_date/address1, none of which RIDE maps, so those rules skip for
+# every record here. Only deterministic_external_id (SASID) ever actually
+# applies to this provider's data today.
 provider_id: ride_enrollment
 provider_code: ride
 dataset_name: enrollment
@@ -16,6 +20,10 @@ format: csv
 file_glob: "ride_enrollment_*.csv"
 delimiter: ","
 has_header: true
+
+# Which rilds_reference column this provider's SASID (member_external_id)
+# is compared against by the deterministic_external_id matcher.
+external_id_column: sasid
 
 column_mappings:            # raw file column      -> canonical attribute
   FIRSTNAME:   first_name

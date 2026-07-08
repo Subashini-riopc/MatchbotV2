@@ -88,8 +88,14 @@ MATCH_ATTRIBUTE_COLUMNS: tuple[str, ...] = (
     "birth_year",
     "birth_month",
     "birth_day",
-    "sasid",
+    "rilds_id",
     "lasid",
+    "ssn",
+    "address1",
+    "address2",
+    "city",
+    "state",
+    "zip",
 )
 
 
