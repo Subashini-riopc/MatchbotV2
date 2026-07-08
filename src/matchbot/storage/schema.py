@@ -80,9 +80,23 @@ def _identity_columns() -> list[Column[Any]]:
         Column("birth_year", SmallInteger),
         Column("birth_month", SmallInteger),
         Column("birth_day", SmallInteger),
-        # provider-specific strong identifiers
-        Column("sasid", String(10)),
+        # Generic provider-issued strong id. Holds whatever value a provider's
+        # `member_external_id` mapping supplies (SASID, CCRI id, DCYF id, ...);
+        # which `rilds_reference` column it's compared against at match time is
+        # resolved per-provider via that provider's `external_id_column`
+        # config, not by this column's name. Replaces the old sasid-only
+        # column/bridge, which only ever worked for one agency's id.
+        Column("rilds_id", String(50)),
+        # Kept for now though unused by any current provider or matcher —
+        # `lasid` predates rilds_id; retained rather than removed since no
+        # decision has been made to drop it outright.
         Column("lasid", String(50)),
+        Column("ssn", String(11)),
+        Column("address1", String(200)),
+        Column("address2", String(200)),
+        Column("city", String(100)),
+        Column("state", String(20)),
+        Column("zip", String(20)),
     ]
 
 
@@ -360,7 +374,7 @@ _BLOCKING_INDEXES: tuple[tuple[str, str, str], ...] = (
     ("idx_member_first_metaphone", "member_universe", "first_name_metaphone1"),
     ("idx_member_last_metaphone", "member_universe", "last_name_metaphone1"),
     ("idx_member_birth_year", "member_universe", "birth_year"),
-    ("idx_member_sasid", "member_universe", "sasid"),
+    ("idx_member_rilds_id", "member_universe", "rilds_id"),
     # composite blocking indexes (most important for performance)
     ("idx_member_block_last8_dob", "member_universe", "last_name8, birth_date"),
     ("idx_member_block_meta_year", "member_universe", "last_name_metaphone1, birth_year"),
@@ -370,7 +384,7 @@ _BLOCKING_INDEXES: tuple[tuple[str, str, str], ...] = (
     ("idx_stage_birth_date", "rilds_stage", "birth_date"),
     ("idx_stage_first_metaphone", "rilds_stage", "first_name_metaphone1"),
     ("idx_stage_last_metaphone", "rilds_stage", "last_name_metaphone1"),
-    ("idx_stage_sasid", "rilds_stage", "sasid"),
+    ("idx_stage_rilds_id", "rilds_stage", "rilds_id"),
     # rilds_reference blocking indexes — the active matching source.
     ("idx_reference_last_name8", "rilds_reference", "last_name8"),
     ("idx_reference_birth_date", "rilds_reference", "birth_date"),

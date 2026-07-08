@@ -89,6 +89,16 @@ class ProviderConfig(_Strict):
     column_mappings: dict[str, str] = Field(
         description="Maps raw file columns onto canonical attributes."
     )
+    # Which rilds_reference column this provider's member_external_id (stored
+    # generically as stage.rilds_id) should be compared against for the
+    # deterministic_external_id matcher — e.g. 'sasid' for RIDE, 'ccri_id' for
+    # a future CCRI provider. Only meaningful when the provider maps
+    # member_external_id; omit otherwise.
+    external_id_column: str | None = Field(
+        default=None,
+        description="rilds_reference column that this provider's "
+        "member_external_id matches against, e.g. 'sasid'.",
+    )
     # canonical attribute -> how to cleanse it
     transforms: dict[str, TransformSpec] = Field(default_factory=dict)
     # rows missing any of these (after mapping) are skipped and counted

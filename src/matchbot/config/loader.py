@@ -32,8 +32,17 @@ from matchbot.config.models import AppConfig, GlobalConfig, MatcherSpec, Provide
 from matchbot.domain.canonical import CANONICAL_NAMES
 from matchbot.matching.derive import DERIVED_COLUMNS
 
-# Attributes valid in matcher keys/comparisons: canonical + derived blocking columns.
-_MATCHER_VALID_ATTRS = CANONICAL_NAMES | frozenset(DERIVED_COLUMNS)
+# Stage-only comparison attributes not produced by add_derived_columns() and
+# not a provider-mappable canonical attribute either: rilds_id is aliased
+# directly from canonical member_external_id in the cleanse stage (see
+# cleanse.py), independent of which agency issued the id. Kept distinct from
+# DERIVED_COLUMNS since that set specifically means "computed by
+# add_derived_columns()".
+_STAGE_ONLY_ATTRS = frozenset({"rilds_id"})
+
+# Attributes valid in matcher keys/comparisons: canonical + derived blocking
+# columns + stage-only comparison keys.
+_MATCHER_VALID_ATTRS = CANONICAL_NAMES | frozenset(DERIVED_COLUMNS) | _STAGE_ONLY_ATTRS
 
 
 class ConfigError(Exception):
@@ -123,7 +132,7 @@ def _validate_cross_references(app: AppConfig) -> None:
     g = app.global_config
     for bk in g.matching.blocking_keys:
         for attr in bk.attributes:
-            if attr not in CANONICAL_NAMES:
+            if attr not in _MATCHER_VALID_ATTRS:
                 errors.append(f"blocking_key {bk.name!r}: unknown attribute {attr!r}")
     for m in g.matching.matchers:
         _validate_matcher_spec(m, "global", errors)

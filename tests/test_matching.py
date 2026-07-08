@@ -11,16 +11,16 @@ from matchbot.matching.base import build_matchers
 from matchbot.pipeline.match import filter_chain_by_provider_attributes
 
 
-def _with_member_external_id(reference_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _with_rilds_id(reference_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Mirror PostgresRepository/InMemoryRepository.load_reference()'s
-    sasid -> member_external_id aliasing. rilds_reference rows only ever have
-    ``sasid`` natively; blocking/matching key on the canonical
-    ``member_external_id`` name, so tests must apply the same aliasing the
-    real repositories do rather than pass raw fixture rows straight through."""
+    external_id_column -> rilds_id aliasing. rilds_reference rows only ever
+    have ``sasid`` natively; blocking/matching key on the generic ``rilds_id``
+    name, so tests must apply the same aliasing the real repositories do
+    rather than pass raw fixture rows straight through."""
     out = []
     for r in reference_rows:
         d = dict(r)
-        d.setdefault("member_external_id", d.get("sasid"))
+        d.setdefault("rilds_id", d.get("sasid"))
         out.append(d)
     return out
 
@@ -29,7 +29,7 @@ def _run_chain(config: AppConfig, record: dict[str, Any], reference_rows: list[d
     g = config.global_config
     provider = config.provider("ride_enrollment")
     keys = g.matching.blocking_keys
-    candidates = _with_member_external_id(reference_rows)
+    candidates = _with_rilds_id(reference_rows)
     index = blocking.index_members(candidates, keys)
     mapped_attributes = set(provider.column_mappings.values())
     chain = filter_chain_by_provider_attributes(g.matching.matchers, mapped_attributes)
@@ -45,7 +45,7 @@ def _run_chain(config: AppConfig, record: dict[str, Any], reference_rows: list[d
 def test_deterministic_sasid_match(
     app_config: AppConfig, ride_reference_rows: list[dict[str, Any]]
 ) -> None:
-    rec = {"first_name": "MARY", "last_name": "CONTRERAS", "member_external_id": "1000049302"}
+    rec = {"first_name": "MARY", "last_name": "CONTRERAS", "rilds_id": "1000049302"}
     out = _run_chain(app_config, rec, ride_reference_rows)
     assert out is not None
     assert out.decision is MatchDecision.MATCHED
@@ -56,7 +56,7 @@ def test_deterministic_sasid_match(
 def test_no_match_for_new_person(
     app_config: AppConfig, ride_reference_rows: list[dict[str, Any]]
 ) -> None:
-    rec = {"first_name": "ZELDA", "last_name": "NOBODY", "member_external_id": "9999999999"}
+    rec = {"first_name": "ZELDA", "last_name": "NOBODY", "rilds_id": "9999999999"}
     out = _run_chain(app_config, rec, ride_reference_rows)
     assert out is None  # routed to UNMATCHED by the orchestrator
 
@@ -65,9 +65,9 @@ def test_blocking_narrows_candidates(
     app_config: AppConfig, ride_reference_rows: list[dict[str, Any]]
 ) -> None:
     keys = app_config.global_config.matching.blocking_keys
-    candidates = _with_member_external_id(ride_reference_rows)
+    candidates = _with_rilds_id(ride_reference_rows)
     index = blocking.index_members(candidates, keys)
-    rec = {"member_external_id": "1000049302", "last_name": "CONTRERAS"}
+    rec = {"rilds_id": "1000049302", "last_name": "CONTRERAS"}
     cand = blocking.candidate_indices(rec, keys, index)
     assert cand == [0]  # only reference row 1 shares a blocking key
 

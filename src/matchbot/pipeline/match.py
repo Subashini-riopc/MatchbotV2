@@ -76,6 +76,10 @@ _DERIVED_ATTRIBUTE_SOURCE: dict[str, str] = {
     "birth_year": "birth_date",
     "birth_month": "birth_date",
     "birth_day": "birth_date",
+    # Generic stage/reference comparison key for a provider's strong id —
+    # populated from canonical member_external_id regardless of which agency
+    # issued it (see cleanse.py / ProviderConfig.external_id_column).
+    "rilds_id": "member_external_id",
 }
 
 
@@ -115,7 +119,8 @@ def filter_chain_by_provider_attributes(
 # here, so a new canonical attribute doesn't require a code change to show up
 # reasonably in reports; add an entry here only to improve its display label.
 _ATTRIBUTE_DISPLAY_NAMES: dict[str, str] = {
-    "member_external_id": "SASID",
+    "member_external_id": "External ID",
+    "rilds_id": "External ID",
     "first_name": "First Name",
     "first_name_std": "First Name",
     "middle_name": "Middle Name",

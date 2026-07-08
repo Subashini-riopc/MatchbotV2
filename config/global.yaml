@@ -43,7 +43,7 @@ matching:
   # Blocking keys cheaply narrow candidate members before scoring.
   blocking_keys:
     - name: external_id_exact
-      attributes: [member_external_id]
+      attributes: [rilds_id]
     - name: ssn_exact
       attributes: [ssn]
     - name: lastname_dob
@@ -76,10 +76,11 @@ matching:
   # never a false accept.
   matchers:
     # Strong provider-assigned id (e.g. RIDE SASID -> member_external_id via
-    # that provider's own column_mappings). Highest precedence.
+    # that provider's own column_mappings, carried generically on stage as
+    # rilds_id). Highest precedence.
     - name: deterministic_external_id
       type: deterministic
-      keys: [member_external_id]
+      keys: [rilds_id]
 
     - name: deterministic_ssn
       type: deterministic
