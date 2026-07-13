@@ -25,7 +25,7 @@ from faker import Faker
 
 OUT = Path("data/samples")
 SEED = 2024
-SIZES = {"1k": 1_000, "10k": 10_000, "100k": 100_000}
+SIZES = {"1k": 1_000, "10k": 10_000, "100k": 100_000, "1m": 1_000_000}
 
 # Exact header from RIDE_Enrollment_sample.csv (note the trailing empty column).
 HEADER = [
@@ -70,8 +70,15 @@ NULL = "NULL"
 TIME0 = "00:00.0"
 
 
-def _person(fake: Faker) -> dict:
-    """One person's stable identity (shared across their enrollment rows)."""
+def person(fake: Faker) -> dict:
+    """One person's stable identity (shared across their enrollment rows).
+
+    Public (no leading underscore) so gen_rilds_reference.py can import and
+    call this directly — that script builds the rilds_reference dataset
+    around the SAME synthetic identities generated here, guaranteeing
+    SASID/name overlap between the two without either script reading any
+    real source data.
+    """
     has_suffix = random.random() < 0.04
     has_middle = random.random() < 0.5
     hs = random.choice(HIGH_SCHOOLS)
@@ -146,12 +153,12 @@ def generate(n_rows: int, fake: Faker, start_recid: int) -> list[list[str]]:
     rows: list[list[str]] = []
     recid = start_recid
     while len(rows) < n_rows:
-        person = _person(fake)
+        this_person = person(fake)
         # A person contributes 1-4 enrollment rows (like the sample's 3).
         n_enroll = min(random.choices([1, 2, 3, 4], weights=[55, 25, 13, 7])[0],
                        n_rows - len(rows))
         for seq in range(1, n_enroll + 1):
-            rows.append(_enrollment_row(recid, person, seq + 1))
+            rows.append(_enrollment_row(recid, this_person, seq + 1))
             recid += 1
     return rows
 

@@ -1,0 +1,4 @@
+snowflake-snowpark-python
+pydantic>=2.13.0
+pyyaml>=6.0.3
+jellyfish>=1.2.1

@@ -1,4 +1,4 @@
-"""Load data/samples/rilds_reference_100k.csv into the rilds_reference table.
+"""Load data/samples/rilds_reference_400k.csv into the rilds_reference table.
 
 Uses the same Settings/DATABASE_URL/DB_SCHEMA env vars as `matchbot init-db`,
 so it works against local Postgres or RDS with no separate connection setup —
@@ -49,8 +49,8 @@ def main() -> None:
     parser.add_argument(
         "--csv",
         type=Path,
-        default=Path("data/samples/rilds_reference_100k.csv"),
-        help="Path to the rilds_reference sample CSV (default: data/samples/rilds_reference_100k.csv).",
+        default=Path("data/samples/rilds_reference_400k.csv"),
+        help="Path to the rilds_reference sample CSV (default: data/samples/rilds_reference_400k.csv).",
     )
     parser.add_argument(
         "--replace",

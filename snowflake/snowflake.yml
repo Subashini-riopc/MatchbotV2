@@ -1,0 +1,75 @@
+definition_version: "2"
+
+entities:
+  run_match_pipeline:
+    type: procedure
+    handler: matchbot_snowflake.procedures.run_pipeline.run_match_pipeline
+    signature:
+      - name: file_path
+        type: string
+    returns: string
+    runtime: "3.11"
+    # Anaconda-channel package deps are declared in ../requirements.txt
+    # (snow snowpark build reads that file automatically) — NOT via this
+    # entity's `imports` field, which is for previously-uploaded stage file
+    # paths, not package names (confirmed against the installed CLI's
+    # ImportsBaseModel: "Stage and path to previously uploaded files").
+    # pydantic/pyyaml are config_models.py's real deps; jellyfish is
+    # register_metaphone_udf's. No matchbot (the real AWS/ECS/Glue package)
+    # artifact here at all — this procedure only imports
+    # matchbot_snowflake.config_models (a deliberate, hand-synced COPY of
+    # matchbot's config loader/models, not an import of the real package;
+    # see config_models.py's module docstring). That avoids needing polars:
+    # matchbot.config's own __init__.py eagerly imports matchbot.config.loader
+    # at package-init time (Python always runs a package's __init__.py
+    # before any of its submodules), and the real loader.py imports
+    # matchbot.matching.derive, which imports polars — a heavy,
+    # unnecessary dependency for a stored procedure that never uses Polars
+    # (matching here is pure SQL). Confirmed via a live
+    # ModuleNotFoundError: 'polars' deployment failure before this was
+    # corrected.
+    #
+    # src points at the PARENT of matchbot_snowflake/ (python, not
+    # python/matchbot_snowflake) — the CLI zips a directory's CONTENTS at
+    # the zip root, not the directory itself. Pointing src/dest directly at
+    # .../matchbot_snowflake put its internal files (land_sql.py, ...) at
+    # the zip root with no wrapping package folder — `import
+    # matchbot_snowflake` failed with ModuleNotFoundError even though the
+    # zip uploaded fine (confirmed by inspecting the built zip directly,
+    # and via a live deployment failure). Pointing at the parent means the
+    # zip's root contains matchbot_snowflake/ as a real subdirectory, which
+    # IS importable.
+    #
+    # config/ (global.yaml + providers/*.yaml) lives at
+    # python/matchbot_snowflake/config/ as a physical, hand-synced COPY of
+    # the real config/ directory (see that folder — kept alongside
+    # config_models.py, same manual-sync pattern, see that module's
+    # docstring). NOT a separate build-time artifact entry pointing at the
+    # real config/: Snowflake's multi-IMPORTS mechanism extracts each
+    # declared zip to its OWN separate sys.path root — they are never
+    # merged into one directory tree, so a second IMPORTS entry for config/
+    # never actually lands inside matchbot_snowflake/'s extracted location
+    # (confirmed live: run_pipeline.py's Path(__file__)-relative lookup
+    # correctly computed .../matchbot_snowflake/config/global.yaml, but
+    # that path didn't exist at runtime — config.zip had been extracted to
+    # its own unrelated root instead). Physically copying config/ into the
+    # same source tree that becomes python.zip is what actually works.
+    # run_pipeline.py resolves this path relative to its own __file__, not
+    # the process's CWD, since Snowflake's sandbox gives no CWD guarantee.
+    artifacts:
+      - src: python
+        dest: python
+    stage: MATCHBOT_DEPLOY_STAGE
+
+  register_metaphone_udf:
+    type: procedure
+    handler: matchbot_snowflake.procedures.run_pipeline.register_metaphone_udf
+    signature: []
+    returns: string
+    runtime: "3.11"
+    # No matchbot artifact needed here — register_metaphone_udf only uses
+    # jellyfish (see the function body), never imports matchbot.
+    artifacts:
+      - src: python
+        dest: python
+    stage: MATCHBOT_DEPLOY_STAGE
