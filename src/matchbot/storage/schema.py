@@ -22,9 +22,6 @@ Tables (mirrors the reference architecture and the agreed DDLs):
                          from proddb (not by this pipeline) — see
                          person_pii_reference_temp_tables.md for provenance.
                          ``idcol_id`` is its natural primary key.
-* ``member_universe``  — legacy member master + identical blocking columns.
-                         No longer the active matching source (superseded by
-                         ``rilds_reference``); kept, unused, for now.
 * ``rilds_matched``    — matched rows (idcol_id, score, method). (Formerly
                          ``target``; ``member_id`` renamed to ``idcol_id`` since
                          it now references ``rilds_reference.idcol_id``.)
@@ -173,19 +170,6 @@ def build_metadata(schema: str) -> MetaData:
         Column("match_score", Numeric(5, 4)),
         Column("match_status", String(20), server_default="PENDING", index=True),
         Column("loaded_at", DateTime(timezone=True), server_default=func.now()),
-    )
-
-    # --- member_universe (authoritative master) -----------------------------
-    Table(
-        "member_universe",
-        md,
-        Column("id", Integer, primary_key=True, autoincrement=True),
-        *_identity_columns(),
-        Column("source_provider", String(20)),
-        Column("source_dataset", String(100)),
-        Column("source_row_id", Integer),
-        Column("created_at", DateTime(timezone=True), server_default=func.now()),
-        Column("updated_at", DateTime(timezone=True), server_default=func.now()),
     )
 
     # --- rilds_matched (matched rows) ---------------------------------------
@@ -367,18 +351,6 @@ def search_path_sql(schema: str) -> TextClause:
 # Performance-critical blocking indexes, as (index_name, table, columns) tuples.
 # Built programmatically to keep the DDL readable. Created after table creation.
 _BLOCKING_INDEXES: tuple[tuple[str, str, str], ...] = (
-    # member_universe indexes — table is unused (superseded by
-    # rilds_reference) but kept fully functional/indexed regardless.
-    ("idx_member_last_name8", "member_universe", "last_name8"),
-    ("idx_member_birth_date", "member_universe", "birth_date"),
-    ("idx_member_first_metaphone", "member_universe", "first_name_metaphone1"),
-    ("idx_member_last_metaphone", "member_universe", "last_name_metaphone1"),
-    ("idx_member_birth_year", "member_universe", "birth_year"),
-    ("idx_member_rilds_id", "member_universe", "rilds_id"),
-    # composite blocking indexes (most important for performance)
-    ("idx_member_block_last8_dob", "member_universe", "last_name8, birth_date"),
-    ("idx_member_block_meta_year", "member_universe", "last_name_metaphone1, birth_year"),
-    ("idx_member_block_meta_month", "member_universe", "first_name_metaphone1, birth_date"),
     # stage blocking indexes
     ("idx_stage_last_name8", "rilds_stage", "last_name8"),
     ("idx_stage_birth_date", "rilds_stage", "birth_date"),
