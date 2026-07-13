@@ -219,3 +219,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Snowflake demo — one-time exported reference data (real PII-shaped rows,
+# never committed; regenerate locally via
+# python -m matchbot_snowflake.export.export_rilds_reference)
+snowflake/data/

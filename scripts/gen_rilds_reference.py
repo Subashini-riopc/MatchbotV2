@@ -1,38 +1,53 @@
-"""Generate a rilds_reference sample + real-data RIDE test input files.
+"""Generate a fully synthetic rilds_reference (400k rows) that overlaps with
+the dummy RIDE enrollment files from gen_ride_enrollment.py.
 
-Sources 100,000 distinct SASID + name records from a real RIDE enrollment
-extract (not committed to the repo — point ``--source`` at your local copy),
-writes them to ``data/samples/rilds_reference_100k.csv`` with fabricated
-SSN/birth_date/gender/address at partial coverage (SSN/DOB/gender/address are
-not present in the source file at all), and separately samples four RIDE
-input test files (1k/10k/100k/1m rows) from the SAME source file — at natural
-random overlap with the reference set, so each shows a different, realistic
-match rate rather than an engineered one.
+No real data anywhere: every identity here comes from gen_ride_enrollment's
+person() generator (Faker-driven, random SASIDs) — the SAME function that
+script uses to build its own dummy RIDE files. Running both scripts with
+their default seeds produces a rilds_reference set whose SASIDs/names
+include a deliberate SAMPLE of the people in EACH of gen_ride_enrollment's
+1k/10k/100k/1m RIDE files, at each file's own 50-75%-range match rate (see
+OVERLAP_RATE below) — enough that a real matching run against this
+reference data produces genuine EXACT_SASID hits from any of the four file
+sizes, at a realistic (not 100%) match rate. None of it is real PII.
+
+400k rows (not 100k): the 1m RIDE file has ~580k distinct people even
+though many of its 1,000,000 rows are repeat enrollments for the same
+person (1-4 rows/person) — giving that file a real 50%+ match rate needs
+the reference table to hold a comparable number of those distinct people,
+which a 100k-row table cannot do regardless of how much row-level
+duplication the RIDE file itself has.
+
+This REPLACES the old version of this script, which sourced identities from
+a real RIDE enrollment extract (--source path) — that dependency on real
+data is exactly what's being removed here.
 
 Run:
-    uv run python scripts/gen_rilds_reference.py \\
-        --source ~/Downloads/RIDE_Enrollment_2024_2025_01292026.csv
-
-Only touches data/samples/ — never modifies the source file.
+    uv run python scripts/gen_rilds_reference.py
 """
 
 from __future__ import annotations
 
-import argparse
 import csv
 import random
 from pathlib import Path
 
 from faker import Faker
 
+from gen_ride_enrollment import SEED as RIDE_SEED
+from gen_ride_enrollment import SIZES as RIDE_SIZES
+from gen_ride_enrollment import generate as gen_ride_rows
+
 OUT = Path("data/samples")
 SEED = 2026
-REFERENCE_SIZE = 100_000
-INPUT_SIZES = {"real_1k": 1_000, "real_10k": 10_000, "real_100k": 100_000, "real_1m": 1_000_000}
+REFERENCE_SIZE = 400_000
 
-# Independent per-field coverage for fabricated columns not present in RIDE's
-# source data at all (SSN/DOB/gender/address) — mixed/lower coverage to
-# simulate realistic reference-data gaps, per the agreed design.
+# Independent per-field coverage for fabricated columns RIDE's schema has no
+# equivalent for at all (SSN/DOB/gender/address) — mixed/lower coverage to
+# simulate realistic reference-data gaps, per the agreed design. gender IS
+# on the RIDE side (SEX), but reference gender is generated independently
+# here rather than copied 1:1, since rilds_reference is meant to model a
+# separately-sourced identity record, not a mirror of one provider's file.
 SSN_COVERAGE = 0.50
 DOB_COVERAGE = 0.55
 GENDER_COVERAGE = 0.60
@@ -50,49 +65,44 @@ RI_CITIES = [
 ]
 
 
-def _read_distinct_sasid_names(source: Path, n: int, rng: random.Random) -> list[dict]:
-    """Stream the source file once, dedup by SASID, reservoir-sample ``n``.
+def _people_from_ride_generator() -> dict[str, list[dict]]:
+    """Reproduce gen_ride_enrollment.py's exact main() sequence (same seed,
+    same generate() calls, same order/sizes) and pull distinct SASID/name
+    identities straight out of the rows it actually returns — keyed by RIDE
+    file size ('1k', '10k', '100k', '1m') so the caller can sample a slice
+    from EACH size rather than an arbitrary prefix of a merged list (a
+    merged list would be dominated by whichever size iterates first/last —
+    the 1m file alone has ~580k unique people, dwarfing the other three
+    combined, so a naive people[:REFERENCE_SIZE] slice risks leaving the
+    smaller files with little or no overlap depending on dict order).
 
-    The file has ~1.4M rows but only ~154k distinct SASIDs (repeat rows are
-    the same person's multiple enrollment records) — first-seen name per
-    SASID is kept, later duplicate rows for that SASID are skipped without
-    buffering the whole file in memory.
+    Not a re-derivation of its RNG draws (person() alone doesn't consume the
+    stream the same way generate() does — generate() also calls
+    random.choices() per person for the enrollment-row count, interleaved
+    with person()'s own draws) — calling generate() itself is the only way
+    to guarantee the identities here are exactly the ones
+    gen_ride_enrollment.py's own run will produce, without duplicating and
+    risking drift from its internal RNG consumption pattern.
     """
-    seen: dict[str, dict] = {}
-    with source.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            # DictReader fills missing trailing fields with None (its
-            # restval, not "") on ragged rows — the source has some of
-            # these, so .get(...) alone isn't enough; guard every field.
-            sasid = (row.get("SASID") or "").strip()
-            if not sasid or sasid in seen:
+    random.seed(RIDE_SEED)
+    fake = Faker()
+    Faker.seed(RIDE_SEED)
+
+    people_by_size: dict[str, list[dict]] = {}
+    recid = 900_000
+    for size_label, n in RIDE_SIZES.items():
+        rows = gen_ride_rows(n, fake, recid)
+        recid += len(rows) + 1000
+        seen_sasids: set[str] = set()
+        people: list[dict] = []
+        for row in rows:
+            first_name, last_name, sasid = row[1], row[3], row[5]
+            if sasid in seen_sasids:
                 continue
-            seen[sasid] = {
-                "sasid": sasid,
-                "first_name": (row.get("FIRSTNAME") or "").strip(),
-                "last_name": (row.get("LASTNAME") or "").strip(),
-            }
-    distinct = list(seen.values())
-    rng.shuffle(distinct)
-    return distinct[:n]
-
-
-def _sample_input_rows(source: Path, n: int, rng: random.Random) -> tuple[list[str], list[list[str]]]:
-    """Reservoir-sample ``n`` raw rows (any SASID, natural repeats allowed)."""
-    header: list[str] = []
-    reservoir: list[list[str]] = []
-    with source.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.reader(f)
-        header = next(reader)
-        for i, row in enumerate(reader):
-            if len(reservoir) < n:
-                reservoir.append(row)
-            else:
-                j = rng.randint(0, i)
-                if j < n:
-                    reservoir[j] = row
-    return header, reservoir
+            seen_sasids.add(sasid)
+            people.append({"sasid": sasid, "first_name": first_name, "last_name": last_name})
+        people_by_size[size_label] = people
+    return people_by_size
 
 
 def _fake_ssn(fake: Faker) -> str:
@@ -108,9 +118,9 @@ def build_reference_rows(people: list[dict], std_config, fake: Faker, rng: rando
     from matchbot.matching import standardize as S
 
     rows = []
-    for i, person in enumerate(people, start=1):
-        first_name = person["first_name"]
-        last_name = person["last_name"]
+    for i, p in enumerate(people, start=1):
+        first_name = p["first_name"]
+        last_name = p["last_name"]
         first_std = S.std_name(first_name, std_config)
         last_std = S.std_name(last_name, std_config)
 
@@ -143,15 +153,15 @@ def build_reference_rows(people: list[dict], std_config, fake: Faker, rng: rando
                 "birth_date": birth_date,
                 "gender": gender,
                 "ssn": ssn,
-                # ModelIdentifiers: only sasid is real; the other 29 are
-                # genuinely unknown for this source and left blank.
+                # ModelIdentifiers: only sasid is populated; the other 29 are
+                # genuinely unknown for this synthetic source and left blank.
                 "apprentice_id": "", "brown_id": "", "bryant_id": "", "ccri_id": "",
                 "college_board_id": "", "dcyf_id": "", "dlt_ern": "", "employri_id": "",
                 "ged_id": "", "jwu_id": "", "kidsnet_child_id": "", "laces_id": "",
                 "laces_staff_id": "", "laces_student_id": "", "lasid": "", "nspid": "",
                 "ods": "", "ric_id": "", "ride_cert_id": "", "ridoh_lead_id": "",
                 "risd_id": "", "rjri_id": "", "rwu_id": "", "salve_id": "",
-                "sasid": person["sasid"],
+                "sasid": p["sasid"],
                 "uri_id": "", "voter_id": "", "workforce_id": "",
                 "providencecollege_id": "", "netech_id": "",
                 # DerivedIdentifiers, computed with the pipeline's own
@@ -180,7 +190,7 @@ def build_reference_rows(people: list[dict], std_config, fake: Faker, rng: rando
                 "birth_day": bd,
                 "birth_year": by,
                 "ssn4": (ssn[-4:] if ssn else ""),
-                "address_source": ("ride_enrollment" if has_address else ""),
+                "address_source": ("synthetic" if has_address else ""),
                 "address1": address1,
                 "address2": "",
                 "city": city,
@@ -211,7 +221,7 @@ REFERENCE_FIELDNAMES = [
 
 
 def write_reference_csv(rows: list[dict]) -> None:
-    path = OUT / "rilds_reference_100k.csv"
+    path = OUT / "rilds_reference_400k.csv"
     with path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=REFERENCE_FIELDNAMES)
         w.writeheader()
@@ -219,26 +229,24 @@ def write_reference_csv(rows: list[dict]) -> None:
     print(f"  wrote {path} ({len(rows):,} rows)")
 
 
-def write_input_csv(name: str, header: list[str], rows: list[list[str]]) -> None:
-    path = OUT / f"ride_enrollment_{name}.csv"
-    with path.open("w", newline="") as f:
-        w = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
-        w.writerow(header)
-        w.writerows(rows)
-    people = len({r[5] for r in rows if len(r) > 5})
-    print(f"  wrote {path}  ({len(rows):,} rows, {people:,} unique people)")
+
+# Per-RIDE-file-size match rate: what PERCENTAGE of THAT size's distinct
+# people get a matching row in rilds_reference (not a flat count — a flat
+# count produces a different, inconsistent percentage per file size, which
+# is confusing to reason about/demo). Percentage is of DISTINCT people
+# (unique SASIDs), not raw rows — a person can have 1-4 repeated enrollment
+# rows in the RIDE file, but only counts once here.
+#
+# All four sizes sit in 50-75% of THEIR OWN distinct-people count. This is
+# why rilds_reference is 400k rows, not 100k: 55% of the 1m file's ~580k
+# distinct people alone is ~320k — a 100k-row table physically cannot hold
+# that many, regardless of how much row-level duplication the 1m file has
+# (duplication reduces neither the 1m file's unique-people count nor how
+# many of THOSE unique people need a reference row to hit a given %).
+OVERLAP_RATE = {"1k": 0.70, "10k": 0.65, "100k": 0.60, "1m": 0.55}
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--source", required=True, type=Path,
-        help="Path to the real RIDE enrollment extract (not committed to the repo).",
-    )
-    args = parser.parse_args()
-    if not args.source.exists():
-        raise SystemExit(f"Source file not found: {args.source}")
-
     from matchbot.config.loader import load_config
 
     rng = random.Random(SEED)
@@ -249,18 +257,49 @@ def main() -> None:
     config = load_config(Path("config"))
     std_config = config.global_config.standardization
 
-    print(f"Reading distinct SASIDs from {args.source} ...")
-    people = _read_distinct_sasid_names(args.source, REFERENCE_SIZE, rng)
-    print(f"  found {len(people):,} distinct people, sampling {REFERENCE_SIZE:,}")
+    print("Reproducing gen_ride_enrollment.py's identities (1k/10k/100k/1m RIDE files) ...")
+    people_by_size = _people_from_ride_generator()
+    for size_label, size_people in people_by_size.items():
+        print(f"  {size_label}: {len(size_people):,} distinct people")
+
+    sample_rng = random.Random(SEED)
+    people: list[dict] = []
+    seen_sasids: set[str] = set()
+    print("Sampling overlap subset from each RIDE file size ...")
+    for size_label, rate in OVERLAP_RATE.items():
+        pool = people_by_size.get(size_label, [])
+        take = round(len(pool) * rate)
+        for p in sample_rng.sample(pool, take):
+            if p["sasid"] in seen_sasids:
+                continue
+            seen_sasids.add(p["sasid"])
+            people.append(p)
+        print(f"  {size_label}: sampled {take:,} of {len(pool):,} ({rate:.1%}) for overlap")
+
+    if len(people) < REFERENCE_SIZE:
+        print(f"Padding with {REFERENCE_SIZE - len(people):,} additional independent synthetic people ...")
+        pad_fake = Faker()
+        Faker.seed(SEED + 1)
+        pad_rng = random.Random(SEED + 1)
+        while len(people) < REFERENCE_SIZE:
+            sasid = str(pad_fake.random_int(2_000_000_000, 2_999_999_999))
+            if sasid in seen_sasids:
+                continue
+            seen_sasids.add(sasid)
+            people.append(
+                {
+                    "sasid": sasid,
+                    "first_name": pad_fake.first_name().upper(),
+                    "last_name": pad_fake.last_name().upper(),
+                }
+            )
+        rng = pad_rng  # coverage rolls below continue from the padding RNG
+    elif len(people) > REFERENCE_SIZE:
+        people = sample_rng.sample(people, REFERENCE_SIZE)
 
     print("Building rilds_reference rows ...")
-    rows = build_reference_rows(people, std_config, fake, rng)
+    rows = build_reference_rows(people[:REFERENCE_SIZE], std_config, fake, rng)
     write_reference_csv(rows)
-
-    print("Sampling real-data RIDE input files ...")
-    for name, n in INPUT_SIZES.items():
-        header, sampled = _sample_input_rows(args.source, n, rng)
-        write_input_csv(name, header, sampled)
 
     print("Done.")
 
