@@ -91,30 +91,38 @@ def test_create_table_sql_works_for_a_totally_different_provider_shape() -> None
 
 
 def test_reject_sql_uses_header_derived_field_count_not_hardcoded() -> None:
+    """Reads via the quote-aware CSV format ($N positional columns), not
+    manual comma-counting — see land_sql.py's module docstring for why: a
+    naive character count can't tell a genuinely shifted row apart from a
+    properly quoted field containing a comma (e.g. a college name)."""
     columns = parse_header_columns(RIDE_HEADER)
     sql = render_reject_ragged_rows_sql("ride", 1, "STAGE/file.csv", len(columns))
     assert "expected 36" in sql
-    assert "!= 36" in sql
+    assert "$37 IS NOT NULL" in sql
     assert "RILDS_LAND_REJECTS" in sql
     assert "'ride'" in sql
+    assert "MATCHBOT_CSV_PROVIDER_FORMAT" in sql
 
 
-def test_load_clean_rows_sql_has_one_split_part_per_column() -> None:
+def test_load_clean_rows_sql_has_one_positional_column_per_header_column() -> None:
     columns = parse_header_columns(RIDE_HEADER)
     sql = render_load_clean_rows_sql("ride", 1, "STAGE/file.csv", columns)
-    assert sql.count("SPLIT_PART($1, ',',") == len(columns)
-    assert "= 36" in sql
+    for i in range(1, len(columns) + 1):
+        assert f"${i}" in sql
+    assert "$37 IS NULL" in sql
+    assert "SPLIT_PART" not in sql
     assert "INSERT INTO RIDE_LAND" in sql
-    # Column list order must match the SPLIT_PART order positionally.
+    assert "MATCHBOT_CSV_PROVIDER_FORMAT" in sql
+    # Column list order must match the positional-column order.
     assert ", ".join(columns) in sql.replace("\n", " ").replace("    ", " ")
 
 
-def test_load_and_reject_sql_use_same_field_count_threshold() -> None:
+def test_load_and_reject_sql_use_same_overflow_column_threshold() -> None:
     """A row must be routed to exactly one of RIDE_LAND / RILDS_LAND_REJECTS
-    — never both, never neither. This only holds if both queries use the
-    identical expected-count boundary."""
+    — never both, never neither. This only holds if both queries check the
+    identical overflow column ($(N+1))."""
     columns = parse_header_columns(RIDE_HEADER)
     reject_sql = render_reject_ragged_rows_sql("ride", 1, "STAGE/file.csv", len(columns))
     load_sql = render_load_clean_rows_sql("ride", 1, "STAGE/file.csv", columns)
-    assert "!= 36" in reject_sql
-    assert "= 36" in load_sql
+    assert "$37 IS NOT NULL" in reject_sql
+    assert "$37 IS NULL" in load_sql

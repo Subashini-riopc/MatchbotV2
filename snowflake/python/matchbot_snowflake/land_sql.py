@@ -21,6 +21,25 @@ RIDE's specific 36 — so the same quarantine logic works for any provider's
 file shape. Rejects go into ONE shared RILDS_LAND_REJECTS table (mirrors
 Postgres's single shared rilds_land_rejects), not a per-provider table —
 only the land table itself is per-provider.
+
+Ragged-row detection and loading both read the file through
+CSV_PROVIDER_FORMAT (quote-aware: FIELD_OPTIONALLY_ENCLOSED_BY = '"'),
+using $1..$N positional columns — NOT the raw single-column format with
+manual comma-counting an earlier version of this module used. That manual
+approach (LENGTH(line) - LENGTH(REPLACE(line, ',', '')) + 1) can't tell a
+genuinely shifted row apart from a properly quoted field containing a
+comma (e.g. "WEST HILLS COLLEGE, LEMOORE") — it counted the quoted comma
+as a real delimiter and flagged every such row as ragged, even though
+Snowflake's real CSV parser (confirmed live) correctly keeps it as one
+field. Caught when a freshly generated synthetic RIDE file — whose
+college-name pool legitimately includes comma-containing names — landed
+0 of 1000 rows, all rejected as "ragged," even though every row was
+well-formed. A genuinely ragged row (too many real fields) still shows up
+here as a non-NULL value in the column immediately past the expected
+count ($(N+1)) — confirmed live against a hand-crafted 3-column test file
+(too-few -> trailing $N is NULL; correct -> exact fit; too-many -> $(N+1)
+is populated) — so that check still works, just computed off the real
+parse instead of a naive character count.
 """
 
 from __future__ import annotations
@@ -41,13 +60,21 @@ _NON_IDENTIFIER_CHARS_RE = re.compile(r"[^A-Z0-9_]")
 
 REJECTS_TABLE = "RILDS_LAND_REJECTS"
 
-# Two distinct raw-line file formats are needed, not one: reading the
-# header requires seeing it (SKIP_HEADER=0); reading data rows requires
-# skipping it (SKIP_HEADER=1). Both are plain single-column CSV formats
-# (FIELD_DELIMITER = NONE) — see snowflake/ddl/02_file_format_and_stage.sql
-# for their CREATE FILE FORMAT statements.
+# Header parsing alone still uses a plain single-column raw-line format
+# (FIELD_DELIMITER = NONE): a file's header rarely contains a quoted comma,
+# and header_columns must be known before the real per-column SELECT below
+# can be built. Reading the header requires seeing it (SKIP_HEADER=0);
+# reading data rows requires skipping it (SKIP_HEADER=1) — see
+# snowflake/ddl/02_file_format_and_stage.sql for both CREATE FILE FORMAT
+# statements.
 HEADER_LINE_FORMAT = "RAW_LINE_FORMAT_WITH_HEADER"
 DATA_LINE_FORMAT = "RAW_LINE_FORMAT_SKIP_HEADER"
+
+# Real, quote-aware CSV parsing (FIELD_OPTIONALLY_ENCLOSED_BY = '"') for
+# ragged-row detection and the actual land-table load — see this module's
+# docstring for why the raw single-column format's manual comma-counting
+# can't be used for either of those two steps.
+DATA_CSV_FORMAT = "MATCHBOT_CSV_PROVIDER_FORMAT"
 
 
 def land_table_name(provider_code: str) -> str:
@@ -140,23 +167,35 @@ def render_reject_ragged_rows_sql(
     pipeline_run_id: int,
     stage_file_path: str,
     expected_field_count: int,
-    raw_line_format: str = DATA_LINE_FORMAT,
+    csv_format: str = DATA_CSV_FORMAT,
 ) -> str:
     """INSERT INTO RILDS_LAND_REJECTS (shared across all providers), reading
     straight off the stage — no intermediate table. The field-count check
     is generic: driven by expected_field_count computed from the file's own
     header, not hardcoded per provider.
+
+    Reads via CSV_PROVIDER_FORMAT ($1..$(N+1), quote-aware), not the raw
+    single-column format — a row is genuinely ragged only if data actually
+    spills into the column PAST the expected count ($(N+1) IS NOT NULL);
+    a quoted comma inside one field (e.g. a college name) is already merged
+    into a single $i by Snowflake's real parser and never reaches here. See
+    this module's docstring for the live-confirmed behavior this relies on.
+    raw_line is reconstructed by rejoining the parsed fields with commas —
+    not guaranteed byte-identical to the original line (e.g. original
+    quoting isn't preserved) but sufficient for DQ investigation.
     """
+    field_refs = [f"${i}" for i in range(1, expected_field_count + 2)]
+    raw_line_expr = f"ARRAY_TO_STRING(ARRAY_CONSTRUCT({', '.join(field_refs)}), ',')"
+    overflow_col = f"${expected_field_count + 1}"
     return f"""INSERT INTO {REJECTS_TABLE} (pipeline_run_id, provider_code, raw_line, reason)
 SELECT
     {pipeline_run_id},
     '{provider_code}',
-    $1,
-    'field count mismatch: expected {expected_field_count}, got ' ||
-        (LENGTH($1) - LENGTH(REPLACE($1, ',', '')) + 1)::VARCHAR
+    {raw_line_expr},
+    'field count mismatch: expected {expected_field_count}, got more'
 FROM @{stage_file_path}
-    (FILE_FORMAT => '{raw_line_format}')
-WHERE (LENGTH($1) - LENGTH(REPLACE($1, ',', '')) + 1) != {expected_field_count}"""
+    (FILE_FORMAT => '{csv_format}')
+WHERE {overflow_col} IS NOT NULL"""
 
 
 def render_load_clean_rows_sql(
@@ -164,25 +203,29 @@ def render_load_clean_rows_sql(
     pipeline_run_id: int,
     stage_file_path: str,
     header_columns: list[str],
-    raw_line_format: str = DATA_LINE_FORMAT,
+    csv_format: str = DATA_CSV_FORMAT,
 ) -> str:
-    """INSERT INTO <PROVIDER>_LAND, reading straight off the stage, one
-    SPLIT_PART per header-derived column — column count and target table
-    both driven entirely by header_columns, never hardcoded.
+    """INSERT INTO <PROVIDER>_LAND, reading straight off the stage via
+    CSV_PROVIDER_FORMAT's real, quote-aware parsing ($1..$N positional
+    columns) — column count and target table both driven entirely by
+    header_columns, never hardcoded.
+
+    Excludes rows where data spills past the expected column count (see
+    render_reject_ragged_rows_sql) — those already went to
+    RILDS_LAND_REJECTS instead.
     """
     land_table = land_table_name(provider_code)
     expected_field_count = len(header_columns)
     column_list = ", ".join(header_columns)
-    split_parts = ",\n    ".join(
-        f"SPLIT_PART($1, ',', {i})" for i in range(1, expected_field_count + 1)
-    )
+    positional_columns = ",\n    ".join(f"${i}" for i in range(1, expected_field_count + 1))
+    overflow_col = f"${expected_field_count + 1}"
     return f"""INSERT INTO {land_table} (
     pipeline_run_id, source_row_id, {column_list}
 )
 SELECT
     {pipeline_run_id},
     METADATA$FILE_ROW_NUMBER,
-    {split_parts}
+    {positional_columns}
 FROM @{stage_file_path}
-    (FILE_FORMAT => '{raw_line_format}')
-WHERE (LENGTH($1) - LENGTH(REPLACE($1, ',', '')) + 1) = {expected_field_count}"""
+    (FILE_FORMAT => '{csv_format}')
+WHERE {overflow_col} IS NULL"""
