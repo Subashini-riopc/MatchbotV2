@@ -29,6 +29,23 @@ class StageTiming:
 
 
 @dataclass(slots=True)
+class FileProfile:
+    """General, provider-agnostic profile of the incoming file as received —
+    computed on the RAW source columns (before canonical mapping/dropping),
+    so it reflects exactly what the provider sent, including columns
+    MatchBot doesn't map to any canonical attribute. Not a business-rule
+    check (see RunMetrics.dq_metrics for that) — this is plain file-shape
+    quality: how many rows/columns, how complete each column is, and how
+    many rows are exact duplicates of another row in the same file.
+    """
+
+    total_rows: int = 0
+    total_columns: int = 0
+    null_counts: dict[str, int] = field(default_factory=dict)
+    duplicate_row_count: int = 0
+
+
+@dataclass(slots=True)
 class RunMetrics:
     """Mutable accumulator for one pipeline run.
 
@@ -63,6 +80,12 @@ class RunMetrics:
     stage_timings: list[StageTiming] = field(default_factory=list)
     dq_metrics: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+
+    # General file-shape profile of the incoming file as received (row/column
+    # counts, per-column null counts, duplicate rows) — set once by
+    # ParseStage, before any canonical mapping. See FileProfile's docstring
+    # for how this differs from dq_metrics.
+    file_profile: FileProfile = field(default_factory=FileProfile)
 
     # Human-readable attribute names the matcher chain actually compared
     # (e.g. ["SASID"], or ["First Name", "Last Name", "Birth Date", "SSN"]).
@@ -137,5 +160,11 @@ class RunMetrics:
                 for t in self.stage_timings
             ],
             "dq_metrics": self.dq_metrics,
+            "file_profile": {
+                "total_rows": self.file_profile.total_rows,
+                "total_columns": self.file_profile.total_columns,
+                "null_counts": self.file_profile.null_counts,
+                "duplicate_row_count": self.file_profile.duplicate_row_count,
+            },
             "error": self.error,
         }

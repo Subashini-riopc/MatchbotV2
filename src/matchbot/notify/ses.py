@@ -2,7 +2,11 @@
 
 Emails an HTML run-summary table: status, provider, row counts, match rate,
 reference table size, duration, and which attributes the matcher chain
-actually compared on. boto3 is imported lazily so the core never depends on it.
+actually compared on — plus a file profile section (RunMetrics.file_profile):
+general, provider-agnostic file-shape quality computed on the RAW source
+columns as received (total rows/columns, null/blank count per source
+column, duplicate row count). boto3 is imported lazily so the core never
+depends on it.
 """
 
 from __future__ import annotations
@@ -23,6 +27,65 @@ def _row(label: str, value: str) -> str:
         f'<td style="padding:6px 12px;border:1px solid #ddd;">{escape(value)}</td>'
         "</tr>"
     )
+
+
+def _file_profile_html(file_profile: dict[str, object]) -> str:
+    """Total rows/columns + one row per source column's null/blank count,
+    plus the duplicate-row count — computed on the raw file as received
+    (see parse.py::_profile_file). Omits the section entirely if no
+    columns were profiled (e.g. an empty file)."""
+    null_counts: dict[str, int] = file_profile["null_counts"]  # type: ignore[assignment]
+    if not null_counts:
+        return ""
+    total_rows = file_profile["total_rows"]
+    header = (
+        "<tr>"
+        + "".join(
+            f'<th style="padding:6px 12px;border:1px solid #ddd;background:#f2f2f2;text-align:left;">{h}</th>'
+            for h in ("Column", "Null / Blank Count", "Null / Blank %")
+        )
+        + "</tr>"
+    )
+    body_rows = []
+    for col, null_count in null_counts.items():
+        pct = (null_count / total_rows) if total_rows else 0.0
+        body_rows.append(
+            "<tr>"
+            f'<td style="padding:6px 12px;border:1px solid #ddd;">{escape(col)}</td>'
+            f'<td style="padding:6px 12px;border:1px solid #ddd;">{null_count}</td>'
+            f'<td style="padding:6px 12px;border:1px solid #ddd;">{pct:.1%}</td>'
+            "</tr>"
+        )
+    return f"""\
+    <h3 style="margin-bottom:4px;">File profile — as received</h3>
+    <table style="border-collapse:collapse;margin-bottom:8px;">
+      {_row("Total rows", str(total_rows))}
+      {_row("Total columns", str(file_profile["total_columns"]))}
+      {_row("Duplicate rows", str(file_profile["duplicate_row_count"]))}
+    </table>
+    <table style="border-collapse:collapse;margin-bottom:16px;">
+      {header}
+      {"".join(body_rows)}
+    </table>"""
+
+
+def _file_profile_lines_text(file_profile: dict[str, object]) -> list[str]:
+    null_counts: dict[str, int] = file_profile["null_counts"]  # type: ignore[assignment]
+    if not null_counts:
+        return []
+    total_rows = file_profile["total_rows"]
+    lines = [
+        "",
+        "File profile — as received:",
+        f"  Total rows: {total_rows}",
+        f"  Total columns: {file_profile['total_columns']}",
+        f"  Duplicate rows: {file_profile['duplicate_row_count']}",
+        "  Null / blank counts by column:",
+    ]
+    for col, null_count in null_counts.items():
+        pct = (null_count / total_rows) if total_rows else 0.0
+        lines.append(f"    {col}: {null_count} ({pct:.1%})")
+    return lines
 
 
 def _build_html(metrics: RunMetrics) -> str:
@@ -50,9 +113,10 @@ def _build_html(metrics: RunMetrics) -> str:
 <html>
   <body style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222;">
     <h2 style="margin-bottom:4px;">MatchBot run summary</h2>
-    <table style="border-collapse:collapse;">
+    <table style="border-collapse:collapse;margin-bottom:16px;">
       {"".join(rows)}
     </table>
+    {_file_profile_html(m["file_profile"])}
   </body>
 </html>"""
 
@@ -78,6 +142,7 @@ def _build_text(metrics: RunMetrics) -> str:
     ]
     if m["error"]:
         lines.append(f"Error: {m['error']}")
+    lines.extend(_file_profile_lines_text(m["file_profile"]))
     return "\n".join(lines)
 
 

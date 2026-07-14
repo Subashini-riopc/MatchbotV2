@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
+from matchbot.audit.metrics import FileProfile
 from matchbot.domain.enums import FileFormat, Stage
 from matchbot.logging_setup import get_logger
 from matchbot.pipeline.base import PipelineContext, StageResult
@@ -36,6 +37,30 @@ if TYPE_CHECKING:
     from matchbot.config.models import ProviderConfig
 
 log = get_logger(__name__)
+
+
+def _profile_file(df: pl.DataFrame) -> FileProfile:
+    """General file-shape quality profile computed on the raw source
+    columns, exactly as the provider sent them — before canonical mapping
+    drops or renames anything. A cell counts as null for this profile if
+    it's SQL-NULL or an all-whitespace string, matching how the rest of the
+    pipeline (skip_if_null, matcher guard clauses) already treats a blank
+    string as equivalent to missing.
+    """
+    null_counts = {
+        col: int(
+            (df[col].is_null() | (df[col].cast(pl.Utf8, strict=False).str.strip_chars() == ""))
+            .sum()
+        )
+        for col in df.columns
+    }
+    duplicate_row_count = int(df.height - df.unique().height) if df.height else 0
+    return FileProfile(
+        total_rows=df.height,
+        total_columns=df.width,
+        null_counts=null_counts,
+        duplicate_row_count=duplicate_row_count,
+    )
 
 # format -> (raw_bytes, ProviderConfig) -> (DataFrame, rejected raw lines)
 ReaderFn = Callable[[bytes, "ProviderConfig"], "tuple[pl.DataFrame, list[dict[str, Any]]]"]
@@ -150,6 +175,11 @@ class ParseStage:
         if reader is None:
             raise ValueError(f"No reader for format {ctx.provider.format!r}")
         df, rejects = reader(self._raw, ctx.provider)
+        # Profile the file BEFORE provenance columns are attached, so
+        # total_columns/null_counts reflect exactly what the provider sent
+        # (source_row_id/provider_id/run_id are never null and would
+        # otherwise dilute the picture).
+        ctx.metrics.file_profile = _profile_file(df)
         # Attach provenance.
         df = df.with_columns(
             pl.arange(0, df.height).alias("source_row_id"),
