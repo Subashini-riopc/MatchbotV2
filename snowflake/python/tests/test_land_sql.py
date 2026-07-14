@@ -15,6 +15,8 @@ from matchbot_snowflake.land_sql import (
     land_table_name,
     parse_header_columns,
     render_create_land_table_sql,
+    render_duplicate_row_count_sql,
+    render_file_profile_sql,
     render_load_clean_rows_sql,
     render_reject_ragged_rows_sql,
 )
@@ -126,3 +128,28 @@ def test_load_and_reject_sql_use_same_overflow_column_threshold() -> None:
     load_sql = render_load_clean_rows_sql("ride", 1, "STAGE/file.csv", columns)
     assert "$37 IS NOT NULL" in reject_sql
     assert "$37 IS NULL" in load_sql
+
+
+def test_file_profile_sql_has_one_select_per_column() -> None:
+    columns = parse_header_columns(RIDE_HEADER)
+    sql = render_file_profile_sql("ride", 1, columns)
+    assert sql.count("UNION ALL") == len(columns) - 1
+    assert "FROM RIDE_LAND WHERE pipeline_run_id = 1" in sql
+    for col in columns:
+        assert f"'{col}' AS column_name" in sql
+    assert "COUNT_IF(" in sql
+
+
+def test_duplicate_row_count_sql_uses_group_by_not_count_distinct() -> None:
+    """Snowflake's multi-column COUNT(DISTINCT a, b, ...) silently drops any
+    row with a NULL in any compared column from the distinct count
+    entirely — confirmed live with a hand-built test — which corrupts a
+    COUNT(*) - COUNT(DISTINCT ...) subtraction. GROUP BY ... HAVING
+    COUNT(*) > 1 treats NULL as an ordinary groupable value instead."""
+    columns = parse_header_columns(RIDE_HEADER)
+    sql = render_duplicate_row_count_sql("ride", 1, columns)
+    assert "COUNT(DISTINCT" not in sql
+    assert "GROUP BY" in sql
+    assert "HAVING COUNT(*) > 1" in sql
+    assert "FROM RIDE_LAND" in sql
+    assert "WHERE pipeline_run_id = 1" in sql

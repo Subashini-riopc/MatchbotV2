@@ -229,3 +229,60 @@ SELECT
 FROM @{stage_file_path}
     (FILE_FORMAT => '{csv_format}')
 WHERE {overflow_col} IS NULL"""
+
+
+def render_file_profile_sql(provider_code: str, pipeline_run_id: int, header_columns: list[str]) -> str:
+    """One row per header_columns entry: null/blank count for that column,
+    scoped to this run's rows in the land table. The Snowflake-side
+    equivalent of matchbot.pipeline.parse::_profile_file's null_counts —
+    computed on the LAND table (this run's landed rows) rather than a
+    Python DataFrame, since there's no in-memory frame at any point in
+    this SQL-generation pipeline. A cell counts as null/blank under the
+    same rule the AWS side uses: SQL NULL or an all-whitespace string.
+
+    UNION ALL rather than one row with N columns: header_columns is
+    provider-specific and arbitrary-length, so a fixed-shape result (one
+    row, one column per header column) would require dynamic pivoting;
+    a tall (column_name, null_count) shape needs no such thing and is
+    just as easy to render in an email.
+    """
+    land_table = land_table_name(provider_code)
+    per_column = "\nUNION ALL\n".join(
+        f"SELECT '{col}' AS column_name, "
+        f"COUNT_IF({col} IS NULL OR TRIM({col}) = '') AS null_count "
+        f"FROM {land_table} WHERE pipeline_run_id = {pipeline_run_id}"
+        for col in header_columns
+    )
+    return per_column
+
+
+def render_duplicate_row_count_sql(provider_code: str, pipeline_run_id: int, header_columns: list[str]) -> str:
+    """Count of rows in this run's landed rows that are exact duplicates of
+    another row on that same run — i.e. sum over (group size - 1) for
+    every group of 2+ identical rows, matching parse.py::_profile_file's
+    duplicate_row_count definition. Compares on header_columns only (not
+    the id/pipeline_run_id/source_row_id/created_at provenance columns),
+    since two source rows with identical data but different provenance
+    are still "the same row as received" for this purpose.
+
+    NOT implemented as COUNT(*) - COUNT(DISTINCT col1, col2, ...): Snowflake's
+    multi-column COUNT(DISTINCT ...) silently excludes any row where ANY
+    column is NULL from the distinct count entirely (confirmed live with a
+    hand-built 4-row test: one row containing a NULL was dropped from
+    COUNT(DISTINCT...) rather than counted as its own distinct value,
+    corrupting the subtraction — a land table's NULLable text columns make
+    this a real, not theoretical, risk). GROUP BY ... HAVING COUNT(*) > 1
+    treats a NULL as an ordinary groupable value, matching how the AWS
+    side's Polars-based duplicate check treats identical-including-null
+    rows as duplicates of each other.
+    """
+    land_table = land_table_name(provider_code)
+    column_list = ", ".join(header_columns)
+    return f"""SELECT COALESCE(SUM(group_size - 1), 0)
+FROM (
+    SELECT COUNT(*) AS group_size
+    FROM {land_table}
+    WHERE pipeline_run_id = {pipeline_run_id}
+    GROUP BY {column_list}
+    HAVING COUNT(*) > 1
+)"""
