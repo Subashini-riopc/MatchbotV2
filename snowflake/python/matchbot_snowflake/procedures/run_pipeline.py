@@ -96,10 +96,17 @@ def run_match_pipeline(session: "Session", file_path: str) -> str:
         fetch_header_columns,
         land_table_name,
         render_create_land_table_sql,
+        render_duplicate_row_count_sql,
+        render_file_profile_sql,
         render_load_clean_rows_sql,
         render_reject_ragged_rows_sql,
     )
     from matchbot_snowflake.matcher_registry import build_sql_fragments
+    from matchbot_snowflake.notify_sql import (
+        matched_on_attributes,
+        render_failure_email_sql,
+        render_success_email_sql,
+    )
     from matchbot_snowflake.provider_sql import render_provider_projection_sql
 
     started_at = time.time()
@@ -280,10 +287,43 @@ def run_match_pipeline(session: "Session", file_path: str) -> str:
             params=[pipeline_run_id, file_path],
         ).collect()
 
+        # Run-summary email — Snowflake-native equivalent of the AWS demo's
+        # SESNotifier (see notify_sql.py's module docstring for the
+        # one-time account setup this depends on). A failure here (e.g. an
+        # unverified recipient) must not fail an otherwise-successful
+        # pipeline run — logged via the return string's own visibility in
+        # CALL's output / INGEST_LOG rather than re-raised.
+        try:
+            reference_row_count = session.sql(
+                "SELECT COUNT(*) FROM RILDS_REFERENCE"
+            ).collect()[0][0]
+            matched_on = matched_on_attributes(app_config.global_config.matching.matchers)
+            duplicate_row_count = session.sql(
+                render_duplicate_row_count_sql(provider_code, pipeline_run_id, header_columns)
+            ).collect()[0][0]
+            null_counts = [
+                (row["COLUMN_NAME"], row["NULL_COUNT"])
+                for row in session.sql(
+                    render_file_profile_sql(provider_code, pipeline_run_id, header_columns)
+                ).collect()
+            ]
+            session.sql(
+                render_success_email_sql(
+                    file_path, provider_code, rows_landed, rows_rejected,
+                    rows_staged, rows_matched, rows_unmatched, match_rate,
+                    duration_seconds, run_uid, matched_on, reference_row_count,
+                    expected_field_count, duplicate_row_count, null_counts,
+                )
+            ).collect()
+        except Exception as email_exc:  # noqa: BLE001
+            log_note = f" (email notification failed: {email_exc})"
+        else:
+            log_note = ""
+
         return (
             f"{file_path}: {rows_matched}/{rows_staged} matched "
             f"({match_rate:.1%}), {rows_unmatched} unmatched, "
-            f"{duration_seconds:.2f}s [SUCCESS] (run_uid={run_uid})"
+            f"{duration_seconds:.2f}s [SUCCESS] (run_uid={run_uid})" + log_note
         )
 
     except Exception as exc:  # noqa: BLE001 — surfaced to CALL's return + audit row
@@ -296,4 +336,8 @@ def run_match_pipeline(session: "Session", file_path: str) -> str:
             "UPDATE INGEST_LOG SET status = 'FAILED', error = ? WHERE file_path = ?",
             params=[str(exc), file_path],
         ).collect()
+        try:
+            session.sql(render_failure_email_sql(file_path, str(exc), run_uid)).collect()
+        except Exception:  # noqa: BLE001 — never mask the real failure below
+            pass
         raise
