@@ -1,0 +1,54 @@
+# RISOS — Voter History file (pipe-delimited .txt), a SECOND file type
+# shipped under the SAME risos_voter folder as provider_risos.yaml's Voter
+# registration file. See s3_folder below for why this matters.
+#
+# This file has no 1:1 column_mappings — its 8 election "slots"
+# (DATE 1/ELECTION 1/TYPE 1/PRECINCT 1/PARTY 1 ... _8) each need to become
+# their OWN output row (one row per election a voter actually participated
+# in, not one wide row per voter with 8 slot-blocks) — an unpivot, not a
+# flat mapping. That shape has no equivalent in ProviderConfig's
+# column_mappings/transforms schema, so column_mappings is left empty here
+# and the real projection logic lives in
+# matchbot_snowflake/voter_history_sql.py's
+# render_voter_history_projection_sql(), called directly by
+# run_pipeline.py for any file type with matches_dataset=false — not
+# generated from this YAML the way provider_sql.py's
+# render_provider_projection_sql() is for a normal (matches_dataset=true)
+# provider.
+#
+# matches_dataset: false because VoterHistory never runs person-linkage
+# matching. In the legacy system (risos/models/voter_history.py), this file
+# inherits PeripheralDataRow, not IndividualDataRow — run_linkage=False,
+# and its get_identifiers() explicitly raises rather than participating in
+# First Pass / Second Pass. A VoterHistory row instead rides on the
+# Voter file's own already-established voter_id -> person_id linkage
+# (legacy's simple_idr_tunnel = {'voter_id': 'voter_id'} join at
+# export/view-build time) — so this pipeline lands + transforms
+# VoterHistory but never attempts to match/link it independently.
+provider_id: risos_voterhistory
+provider_code: risos
+dataset_name: voterhistory
+display_name: "RISOS — Voter History"
+format: csv
+file_glob: "VoterHistory_*.txt"
+delimiter: "|"
+has_header: true
+
+# risos_voterhistory's own files land in the SAME S3 folder as the primary
+# Voter file (risos_voter), not a folder named after this file type's own
+# provider_id — see ProviderConfig.s3_folder and
+# config_bridge.py's provider_folder_name().
+s3_folder: risos_voter
+
+# Same folder as provider_risos.yaml (RISOS ships >1 file type there).
+multi_file: true
+
+# See module docstring: this file type transforms but never matches.
+matches_dataset: false
+
+# No column_mappings/transforms here — see module docstring. The real
+# per-election unpivot + zero-padding (voter_id -> 11 chars, precinct -> 4
+# chars, matching legacy's per-slot ImporterField setup in
+# risos/models/voter_history.py) lives in voter_history_sql.py, driven off
+# RISOS_VOTERHISTORY_LAND's actual column names directly, not this file.
+column_mappings: {}

@@ -35,6 +35,9 @@ DERIVED_COLUMNS: tuple[str, ...] = (
     "birth_year",
     "birth_month",
     "birth_day",
+    "address1_std",
+    "zip5",
+    "ssn4",
 )
 
 
@@ -79,6 +82,36 @@ def add_derived_columns(df: pl.DataFrame, std_config: StandardizationConfig) -> 
     out = out.with_columns(
         pl.col("last_name_std").str.slice(0, 8).alias("last_name8")
     )
+
+    # Standardized address1 (abbreviation-normalized street text).
+    if "address1" in out.columns:
+        out = out.with_columns(
+            pl.col("address1")
+            .map_elements(lambda v: S.std_address(v, std_config), return_dtype=pl.Utf8)
+            .alias("address1_std")
+        )
+    else:
+        out = out.with_columns(pl.lit(None, dtype=pl.Utf8).alias("address1_std"))
+
+    # zip5 — zip truncated to 5 digits, ZIP+4 suffix dropped.
+    if "zip" in out.columns:
+        out = out.with_columns(
+            pl.col("zip")
+            .map_elements(S.std_zip, return_dtype=pl.Utf8)
+            .alias("zip5")
+        )
+    else:
+        out = out.with_columns(pl.lit(None, dtype=pl.Utf8).alias("zip5"))
+
+    # ssn4 — last four digits of a standardized SSN.
+    if "ssn" in out.columns:
+        out = out.with_columns(
+            pl.col("ssn")
+            .map_elements(S.ssn4, return_dtype=pl.Utf8)
+            .alias("ssn4")
+        )
+    else:
+        out = out.with_columns(pl.lit(None, dtype=pl.Utf8).alias("ssn4"))
 
     # Decompose birth_date (stored as ISO string or Date) into y/m/d.
     if "birth_date" in out.columns:

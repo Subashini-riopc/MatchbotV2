@@ -31,6 +31,20 @@ CREATE FILE FORMAT IF NOT EXISTS CSV_PROVIDER_FORMAT
     ERROR_ON_COLUMN_COUNT_MISMATCH = TRUE
     COMMENT = 'Matches provider CSV shape (comma-delimited, header row present)';
 
+-- Pipe-delimited counterpart to CSV_PROVIDER_FORMAT, added when onboarding
+-- RISOS (config/providers/provider_risos.yaml: delimiter: "|"). Same
+-- settings otherwise — land_sql.py picks whichever of these two matches the
+-- provider's configured delimiter (see render_*_sql's csv_format param).
+CREATE FILE FORMAT IF NOT EXISTS PIPE_PROVIDER_FORMAT
+    TYPE = 'CSV'
+    FIELD_DELIMITER = '|'
+    SKIP_HEADER = 1
+    FIELD_OPTIONALLY_ENCLOSED_BY = '"'
+    NULL_IF = ('', 'NULL')
+    EMPTY_FIELD_AS_NULL = TRUE
+    ERROR_ON_COLUMN_COUNT_MISMATCH = TRUE
+    COMMENT = 'Matches provider pipe-delimited shape (e.g. RISOS), header row present';
+
 -- Two single-column "raw line" formats used by land_sql.py's dynamic land
 -- step: FIELD_DELIMITER = NONE means each row is read as one undivided
 -- text value ($1), which Python then splits and counts itself — this is

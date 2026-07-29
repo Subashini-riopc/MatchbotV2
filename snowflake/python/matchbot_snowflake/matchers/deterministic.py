@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from matchbot_snowflake.matcher_registry import register_sql_matcher
+from matchbot_snowflake.matcher_registry import _BuiltFragment, register_sql_matcher
 
 if TYPE_CHECKING:
     from matchbot.config.models import MatcherSpec
@@ -100,9 +100,8 @@ def _blank_check_sql(column_ref: str, key: str) -> str:
 @register_sql_matcher("deterministic")
 def build_deterministic_fragment(
     spec: "MatcherSpec", external_id_column: str
-) -> tuple[str, str, str]:
-    """Return (join_predicate_sql, guard_predicate_sql, method_label) for
-    one deterministic MatcherSpec.
+) -> _BuiltFragment:
+    """Return a _BuiltFragment for one deterministic MatcherSpec.
 
     ``external_id_column`` is the current provider's
     ProviderConfig.external_id_column (e.g. 'sasid' for RIDE). Only
@@ -113,6 +112,12 @@ def build_deterministic_fragment(
     (SASID, CCRI_ID, ...). Mirrors storage/postgres.py's
     d["rilds_id"] = d.get(external_id_column), which does the same
     dynamic resolution on the Python/Postgres side.
+
+    score_sql/accept_threshold/review_threshold are left at _BuiltFragment's
+    defaults (always 1.0/1.0/1.0): a deterministic join is either an exact
+    match (score 1.0, always >= the 1.0 accept_threshold) or the row simply
+    never appears as a join candidate at all — there is no partial-credit
+    or review-band case for this matcher type.
     """
     if not spec.keys:
         # A deterministic matcher with no keys can never match anything —
@@ -120,7 +125,7 @@ def build_deterministic_fragment(
         # would just build a matcher whose `for k in self.keys` loop never
         # runs and immediately returns NO_MATCH. Encode that explicitly
         # rather than emit SQL with an empty AND/ON clause.
-        return ("1 = 0", "1 = 0", _method_label(spec.name))
+        return _BuiltFragment("1 = 0", "1 = 0", _method_label(spec.name))
 
     def _ref_override(key: str) -> str | None:
         return external_id_column if key == _EXTERNAL_ID_KEY else None
@@ -134,4 +139,4 @@ def build_deterministic_fragment(
         _blank_check_sql(_col("s", key), key) for key in spec.keys
     )
 
-    return (join_conditions, guard_conditions, _method_label(spec.name))
+    return _BuiltFragment(join_conditions, guard_conditions, _method_label(spec.name))

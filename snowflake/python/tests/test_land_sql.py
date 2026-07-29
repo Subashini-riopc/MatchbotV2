@@ -12,8 +12,11 @@ from __future__ import annotations
 
 from matchbot_snowflake.land_sql import (
     REJECTS_TABLE,
+    csv_format_for_delimiter,
+    file_type_from_filename,
     land_table_name,
     parse_header_columns,
+    render_add_missing_columns_sql,
     render_create_land_table_sql,
     render_duplicate_row_count_sql,
     render_file_profile_sql,
@@ -153,3 +156,87 @@ def test_duplicate_row_count_sql_uses_group_by_not_count_distinct() -> None:
     assert "HAVING COUNT(*) > 1" in sql
     assert "FROM RIDE_LAND" in sql
     assert "WHERE pipeline_run_id = 1" in sql
+
+
+# ---------------------------------------------------------------------------
+# Multi-file providers (e.g. RISOS: voter registration + voter history,
+# unrelated columns) — one land table per file type, not one per provider.
+# ---------------------------------------------------------------------------
+
+
+def test_file_type_from_filename_strips_extension_and_trailing_date() -> None:
+    assert file_type_from_filename("Voter_032026.txt") == "VOTER"
+    assert file_type_from_filename("VoterHistory_032026.txt") == "VOTERHISTORY"
+
+
+def test_file_type_from_filename_strips_hyphenated_date() -> None:
+    assert file_type_from_filename("ride_enrollment_2026-07-09.csv") == "RIDE_ENROLLMENT"
+
+
+def test_file_type_from_filename_handles_full_path() -> None:
+    assert file_type_from_filename("risos_voter/Voter_032026.txt") == "VOTER"
+
+
+def test_land_table_name_without_file_type_is_unchanged() -> None:
+    """RIDE (multi_file=False) must keep its exact existing table name —
+    no suffix, no rename of an already-deployed table."""
+    assert land_table_name("ride") == "RIDE_LAND"
+    assert land_table_name("ride", None) == "RIDE_LAND"
+
+
+def test_land_table_name_with_file_type_is_provider_and_type_specific() -> None:
+    assert land_table_name("risos", "VOTER") == "RISOS_VOTER_LAND"
+    assert land_table_name("risos", "VOTERHISTORY") == "RISOS_VOTERHISTORY_LAND"
+
+
+def test_create_table_sql_uses_file_type_suffixed_name() -> None:
+    columns = parse_header_columns("VOTER ID|LAST NAME|FIRST NAME", delimiter="|")
+    sql = render_create_land_table_sql("risos", columns, file_type="VOTER")
+    assert "CREATE TABLE IF NOT EXISTS RISOS_VOTER_LAND" in sql
+
+
+def test_load_clean_rows_sql_uses_file_type_suffixed_name() -> None:
+    columns = parse_header_columns("VOTER ID|LAST NAME|FIRST NAME", delimiter="|")
+    sql = render_load_clean_rows_sql(
+        "risos", 1, "STAGE/f.txt", columns, csv_format="MATCHBOT_PIPE_PROVIDER_FORMAT",
+        file_type="VOTERHISTORY",
+    )
+    assert "INSERT INTO RISOS_VOTERHISTORY_LAND" in sql
+
+
+def test_csv_format_for_delimiter_covers_comma_and_pipe() -> None:
+    assert csv_format_for_delimiter(",") == "MATCHBOT_CSV_PROVIDER_FORMAT"
+    assert csv_format_for_delimiter("|") == "MATCHBOT_PIPE_PROVIDER_FORMAT"
+
+
+def test_csv_format_for_delimiter_raises_on_unconfigured_delimiter() -> None:
+    """Must raise, not silently fall back to comma — a wrong-but-valid file
+    format would still "succeed" while mis-splitting every row (the exact
+    failure mode this function exists to prevent)."""
+    import pytest
+
+    with pytest.raises(ValueError, match="no Snowflake file format configured"):
+        csv_format_for_delimiter(";")
+
+
+def test_add_missing_columns_sql_only_for_columns_not_already_present() -> None:
+    """Two structurally different files sharing a provider (RISOS's voter
+    registration vs. voter history) must never collide on one table — but a
+    LATER file of the SAME type gaining a new column should evolve its own
+    table via ADD COLUMN, not fail or silently drop the new column."""
+    header_columns = ["VOTER_ID", "LAST_NAME", "FIRST_NAME", "NEW_FIELD"]
+    existing_columns = {"VOTER_ID", "LAST_NAME", "FIRST_NAME"}
+    statements = render_add_missing_columns_sql(
+        "risos", header_columns, existing_columns, file_type="VOTER"
+    )
+    assert len(statements) == 1
+    assert "ALTER TABLE RISOS_VOTER_LAND ADD COLUMN IF NOT EXISTS NEW_FIELD VARCHAR" in statements[0]
+
+
+def test_add_missing_columns_sql_empty_when_nothing_missing() -> None:
+    header_columns = ["VOTER_ID", "LAST_NAME"]
+    existing_columns = {"VOTER_ID", "LAST_NAME", "FIRST_NAME"}
+    statements = render_add_missing_columns_sql(
+        "risos", header_columns, existing_columns, file_type="VOTER"
+    )
+    assert statements == []

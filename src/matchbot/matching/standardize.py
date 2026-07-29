@@ -61,6 +61,38 @@ def name_suffix(value: str | None, std_config: StandardizationConfig) -> str | N
     return None
 
 
+def std_address(value: str | None, std_config: StandardizationConfig) -> str | None:
+    """Standardize an address line: uppercase, collapse whitespace, then
+    replace each whole token matching a configured address_abbreviations key
+    with its abbreviation (e.g. "STREET" -> "ST"). Unmatched tokens pass
+    through unchanged. Returns None for empty input.
+
+    Token-by-token replacement (not a blanket substring replace) so an
+    abbreviation match inside an unrelated word is never corrupted — e.g.
+    replacing "EAST" -> "E" must not also rewrite "EASTON".
+    """
+    if value is None:
+        return None
+    text = squash_ws(value).upper()
+    if not text:
+        return None
+
+    abbrev_map = {k.upper(): v.upper() for k, v in std_config.address_abbreviations.items()}
+    tokens = [abbrev_map.get(t, t) for t in text.split(" ")]
+    return " ".join(tokens) or None
+
+
+def std_zip(value: str | None) -> str | None:
+    """Strip to the first 5 digits, dropping any ZIP+4 suffix. None if
+    fewer than 5 digits remain (mirrors std_ssn's malformed-input guard)."""
+    if value is None:
+        return None
+    digits = _DIGITS_RE.sub("", value)
+    if len(digits) < 5:
+        return None
+    return digits[:5]
+
+
 def std_ssn(value: str | None, *, width: int = 9) -> str | None:
     """Strip non-digits and left-pad to ``width``. None for empty input.
 

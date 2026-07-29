@@ -85,11 +85,25 @@ CREATE TABLE IF NOT EXISTS RILDS_REFERENCE (
     -- Address (one row per idcol_id)
     address_source           VARCHAR(100),
     address1                 VARCHAR(200),
+    address1_std              VARCHAR(200),            -- standardized address1; assumed precomputed
+                                                          -- upstream, same contract as first_name_std
+                                                          -- above, for the name+address matcher tiers
     address2                 VARCHAR(200),
     city                     VARCHAR(100),
     state                    VARCHAR(20),
-    zip                      VARCHAR(20)
+    zip                      VARCHAR(20),
+    zip5                      VARCHAR(5)                -- zip truncated to 5 digits; same contract as
+                                                          -- address1_std above
 );
+
+-- ADD COLUMN IF NOT EXISTS for already-deployed accounts (CREATE TABLE IF
+-- NOT EXISTS above is a no-op against an existing RILDS_REFERENCE). Adding
+-- these columns does not populate them for existing rows — address1_std/
+-- zip5 are assumed precomputed upstream (same one-time-export contract as
+-- first_name_std/last_name_std); existing rows read NULL here until
+-- whatever process populates this table provides them.
+ALTER TABLE RILDS_REFERENCE ADD COLUMN IF NOT EXISTS address1_std VARCHAR(200);
+ALTER TABLE RILDS_REFERENCE ADD COLUMN IF NOT EXISTS zip5 VARCHAR(5);
 
 -- Clustering keys mirroring the Postgres composite blocking indexes.
 ALTER TABLE RILDS_REFERENCE CLUSTER BY (last_name8, birth_date);

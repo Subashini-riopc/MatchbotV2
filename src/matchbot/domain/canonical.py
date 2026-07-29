@@ -91,11 +91,14 @@ MATCH_ATTRIBUTE_COLUMNS: tuple[str, ...] = (
     "rilds_id",
     "lasid",
     "ssn",
+    "ssn4",
     "address1",
+    "address1_std",
     "address2",
     "city",
     "state",
     "zip",
+    "zip5",
 )
 
 

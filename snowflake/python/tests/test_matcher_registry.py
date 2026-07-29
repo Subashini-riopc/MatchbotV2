@@ -17,17 +17,25 @@ from matchbot_snowflake.matcher_registry import build_sql_fragments
 CONFIG_DIR = Path(__file__).resolve().parents[3] / "config"
 
 
-def test_real_chain_produces_four_fragments_in_order() -> None:
+def test_real_chain_produces_twelve_fragments_in_order() -> None:
     app_config = load_config(CONFIG_DIR)
     fragments = build_sql_fragments(app_config.global_config.matching.matchers, "sasid")
 
     assert [f.name for f in fragments] == [
         "deterministic_external_id",
         "deterministic_ssn",
+        "deterministic_name_ssn4",
         "deterministic_name_dob",
+        "deterministic_name_addr_full",
+        "deterministic_name_addr_city_state",
+        "deterministic_name_addr_street_zip",
         "deterministic_name_addr",
+        "deterministic_fn_addr",
+        "fuzzy_name_exact_addr",
+        "fuzzy_exact_name_addr",
+        "fuzzy_name_addr_combined",
     ]
-    assert [f.priority for f in fragments] == [1, 2, 3, 4]
+    assert [f.priority for f in fragments] == list(range(1, 13))
 
 
 def test_external_id_matcher_reports_exact_sasid() -> None:
@@ -47,9 +55,34 @@ def test_other_deterministic_matchers_report_plain_exact() -> None:
     app_config = load_config(CONFIG_DIR)
     fragments = build_sql_fragments(app_config.global_config.matching.matchers, "sasid")
 
-    for name in ("deterministic_ssn", "deterministic_name_dob", "deterministic_name_addr"):
+    for name in (
+        "deterministic_ssn",
+        "deterministic_name_ssn4",
+        "deterministic_name_dob",
+        "deterministic_name_addr_full",
+        "deterministic_name_addr_city_state",
+        "deterministic_name_addr_street_zip",
+        "deterministic_name_addr",
+        "deterministic_fn_addr",
+    ):
         fragment = next(f for f in fragments if f.name == name)
         assert fragment.method_label == "EXACT"
+
+
+def test_fuzzy_matchers_report_fuzzy_and_real_thresholds() -> None:
+    app_config = load_config(CONFIG_DIR)
+    fragments = build_sql_fragments(app_config.global_config.matching.matchers, "sasid")
+
+    for name, expected_accept in (
+        ("fuzzy_name_exact_addr", 0.8),
+        ("fuzzy_exact_name_addr", 0.8),
+        ("fuzzy_name_addr_combined", 0.75),
+    ):
+        fragment = next(f for f in fragments if f.name == name)
+        assert fragment.method_label == "FUZZY"
+        assert fragment.accept_threshold == expected_accept
+        assert fragment.review_threshold == 0.6
+        assert fragment.score_sql != "1.0"  # a real weighted-score expression, not the deterministic default
 
 
 def test_birth_date_compares_natively_not_as_string() -> None:
@@ -70,7 +103,7 @@ def test_multi_key_matchers_and_all_keys_in_join_and_guard() -> None:
     fragments = build_sql_fragments(app_config.global_config.matching.matchers, "sasid")
     name_addr = next(f for f in fragments if f.name == "deterministic_name_addr")
 
-    for key in ("first_name_std", "last_name_std", "address1"):
+    for key in ("first_name_std", "last_name_std", "address1_std"):
         assert f"s.{key}" in name_addr.join_predicate_sql
         assert f"s.{key}" in name_addr.guard_predicate_sql
         assert f"r.{key}" in name_addr.join_predicate_sql

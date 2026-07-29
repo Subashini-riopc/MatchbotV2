@@ -79,6 +79,9 @@ DERIVED_COLUMNS: tuple[str, ...] = (
     "birth_year",
     "birth_month",
     "birth_day",
+    "address1_std",
+    "zip5",
+    "ssn4",
 )
 
 # Mirrors config/loader.py's _STAGE_ONLY_ATTRS + _MATCHER_VALID_ATTRS.
@@ -129,9 +132,26 @@ class ProviderConfig(_Strict):
     display_name: str
     format: FileFormat
     file_glob: str
+    # S3 folder this file type's files land under; defaults to provider_id
+    # (see config_bridge.py's provider_folder_name()). Set explicitly for a
+    # multi_file provider's second+ file type, whose own provider_id is NOT
+    # the shared folder name (e.g. risos_voterhistory's files land under
+    # risos_voter, the same folder as the primary Voter file).
+    s3_folder: str | None = None
     provider_code: str = Field(default="", max_length=20)
     dataset_name: str = Field(default="", max_length=100)
-    column_mappings: dict[str, str]
+    # True when this provider ships more than one structurally distinct file
+    # under the same folder (e.g. RISOS: voter registration + voter history,
+    # unrelated columns) — land table becomes {provider_code}_{file_type}_land
+    # instead of {provider_code}_land. See land_sql.py's land_table_name().
+    multi_file: bool = False
+    # False for a file type that lands + transforms but never goes through
+    # person-linkage matching (e.g. RISOS VoterHistory — rides on the
+    # primary Voter file's voter_id -> person_id linkage instead of its
+    # own). True (default) for every file type that goes through the full
+    # cleanse -> canonical -> match pipeline.
+    matches_dataset: bool = True
+    column_mappings: dict[str, str] = Field(default_factory=dict)
     external_id_column: str | None = None
     transforms: dict[str, TransformSpec] = Field(default_factory=dict)
     skip_if_null: list[str] = Field(default_factory=list)
@@ -166,6 +186,7 @@ class StandardizationConfig(_Strict):
     gender_map: dict[str, str] = Field(default_factory=dict)
     name_suffixes: list[str] = Field(default_factory=list)
     name_prefixes: list[str] = Field(default_factory=list)
+    address_abbreviations: dict[str, str] = Field(default_factory=dict)
 
 
 class BlockingKey(_Strict):

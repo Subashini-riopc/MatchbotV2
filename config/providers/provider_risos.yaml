@@ -1,0 +1,91 @@
+# RISOS — RI Secretary of State voter registration file (pipe-delimited,
+# shipped as .txt, not .csv). Land loading is generic for ANY RISOS file,
+# not just this one — see multi_file below.
+#
+# Land loading needs this file registered in PROVIDER_FOLDER_MAP (via
+# config_bridge.py's MERGE INTO) plus scripts/lambda_function_glue.py's
+# FOLDER_TO_PROVIDER/PROVIDER_GLOB — the land table itself is still created
+# dynamically from each file's own header row (land_sql.py), no DDL needed
+# for the table shape. column_mappings/transforms below only matter once
+# THIS file type (voter registration) is wired into the stage/match steps —
+# RISOS also sends other file types (e.g. VoterHistory_*.txt) that land
+# into their own table but skip stage/match until their own mapping is
+# built (run_pipeline.py only stages/matches the file type this YAML's
+# file_glob describes; see its module docstring).
+#
+# Note on the header: the raw header line ends in a trailing '|' (an extra
+# empty token after EMAIL). parse_header_columns() drops empty tokens, so
+# this does not produce a stray column in the land table — confirmed
+# against land_sql.py's _sanitize_column_name/parse_header_columns.
+#
+# Note on delimiter: this is the first pipe-delimited provider (RIDE is
+# comma). The Snowflake land step originally hardcoded a comma-delimited
+# file format for every provider (CSV_PROVIDER_FORMAT) — fixed by adding
+# PIPE_PROVIDER_FORMAT (snowflake/ddl/02_file_format_and_stage.sql) and
+# threading provider.delimiter through PROVIDER_FOLDER_MAP ->
+# run_pipeline.py -> land_sql.py's csv_format_for_delimiter(), so this
+# `delimiter: "|"` value is what actually selects the right file format at
+# load time, not just cosmetic.
+provider_id: risos_voter
+provider_code: risos
+dataset_name: voter
+display_name: "RISOS — Voter Registration"
+format: csv
+file_glob: "Voter_*.txt"
+delimiter: "|"
+has_header: true
+
+# RISOS ships more than one structurally distinct file under the same
+# risos_voter folder (voter registration here, voter history separately,
+# more may be added later) — each gets its own land table
+# ({PROVIDER}_{FILE_TYPE}_LAND, file_type derived from the filename, see
+# land_sql.py's file_type_from_filename) instead of sharing one RISOS_LAND
+# table that only one file shape could actually fit.
+multi_file: true
+
+# VOTER ID is this provider's strong person key.
+external_id_column: voter_id
+
+column_mappings:              # raw file column      -> canonical attribute
+  FIRST_NAME:  first_name
+  MIDDLE_NAME: middle_name
+  LAST_NAME:   last_name
+  VOTER_ID:    member_external_id
+  GENDER:      gender
+  DATE_OF_BIRTH: birth_date
+  STREET_NUMBER: address1
+  STREET_NAME:   address2
+  CITY:        city
+  STATE:       state
+  ZIP_CODE:    zip
+  # PREFIX/SUFFIX, party/district/precinct columns, phone, email, and the
+  # separate MAILING_* address block are intentionally NOT mapped here —
+  # not identity attributes needed for matching. Unmapped columns are
+  # dropped at the canonical stage (provenance: source_row_id is still
+  # preserved per row). Revisit MAILING_* if RISOS's residential address
+  # turns out to be less reliable than its mailing address for matching.
+
+transforms:
+  first_name:          { type: string, upper: true }
+  middle_name:         { type: string, upper: true }
+  last_name:           { type: string, upper: true }
+  # Legacy (risos/models/voter.py: zeropad_fields = ['voter_id', 'zip_code',
+  # 'zip4_code']) left-pads voter_id to 11 chars (its Django max_length) and
+  # zip_code to 5 — a shorter value (e.g. a leading zero dropped somewhere
+  # upstream) would otherwise silently fail to match against legacy-derived
+  # reference data. Every row in the file landed so far is already exactly
+  # 11/5 chars, so this is currently a no-op — kept as a defensive parity
+  # match with legacy, not a fix for an observed bad value.
+  member_external_id:  { type: string, trim: true, zero_pad: 11 }
+  gender:              { type: string, upper: true }
+  birth_date:          { type: date, format: "%m/%d/%Y" }
+  address1:            { type: string, upper: true, trim: true }
+  address2:            { type: string, upper: true, trim: true }
+  city:                { type: string, upper: true, trim: true }
+  state:               { type: string, upper: true, trim: true }
+  zip:                 { type: string, trim: true, zero_pad: 5 }
+
+# Only the person key is required to attempt a match.
+skip_if_null: [member_external_id]
+
+# No matchers override — inherits the global default chain (config/global.yaml).

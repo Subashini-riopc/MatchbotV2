@@ -6,19 +6,60 @@
 -- python/matchbot_snowflake/config_bridge.py (MERGE INTO, idempotent) —
 -- never hand-edited, so this table can't drift from the YAML the way the
 -- two Lambda dicts can from each other.
+--
+-- PRIMARY KEY is (folder_name, file_glob), not folder_name alone: a
+-- multi_file provider (e.g. RISOS) can have several ProviderConfigs
+-- sharing one folder_name (risos_voter) but each with its own file_glob
+-- (Voter_*.txt vs VoterHistory_*.txt) and its own column_mappings/
+-- matches_dataset — run_pipeline.py resolves which row applies to an
+-- incoming file by matching its filename against each candidate row's
+-- file_glob (fnmatch), not by folder_name alone. A single-file-type
+-- provider (RIDE) still gets exactly one row, so its behavior is
+-- unchanged — this is additive, not a behavior change for RIDE.
 
 USE DATABASE MATCHBOT;
 USE SCHEMA RILDS;
 
 CREATE TABLE IF NOT EXISTS PROVIDER_FOLDER_MAP (
-    folder_name         VARCHAR(100) NOT NULL PRIMARY KEY,  -- S3 key's provider-folder segment, e.g. 'ride_enrollment'
+    folder_name         VARCHAR(100) NOT NULL,               -- S3 key's provider-folder segment, e.g. 'ride_enrollment'
     provider_id         VARCHAR(100) NOT NULL,              -- ProviderConfig.provider_id
     provider_code       VARCHAR(20)  NOT NULL,               -- ProviderConfig.provider_code
     dataset_name        VARCHAR(100) NOT NULL,               -- ProviderConfig.dataset_name
     file_glob           VARCHAR(200) NOT NULL,               -- ProviderConfig.file_glob
     external_id_column  VARCHAR(50),                         -- ProviderConfig.external_id_column, e.g. 'sasid'
-    updated_at          TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+    -- ProviderConfig.delimiter, e.g. ',' for RIDE, '|' for RISOS. Read by
+    -- run_pipeline.py to pick the matching Snowflake file format via
+    -- land_sql.py's csv_format_for_delimiter() — added when onboarding
+    -- RISOS, whose pipe-delimited file exposed that the land step was
+    -- hardcoded to comma (CSV_PROVIDER_FORMAT) with no per-provider override.
+    delimiter           VARCHAR(5)   NOT NULL DEFAULT ',',
+    -- ProviderConfig.multi_file. FALSE (default) keeps a provider's land
+    -- table name exactly {provider_code}_land (e.g. RIDE_LAND, unchanged).
+    -- TRUE means this provider ships multiple structurally distinct files
+    -- under one folder (e.g. RISOS: voter registration + voter history) —
+    -- run_pipeline.py then names each file's land table
+    -- {provider_code}_{file_type}_land, file_type derived from the
+    -- filename (land_sql.py's file_type_from_filename), so two unrelated
+    -- file shapes never collide on one table.
+    multi_file          BOOLEAN      NOT NULL DEFAULT FALSE,
+    -- ProviderConfig.matches_dataset. FALSE for a file type that only
+    -- lands + transforms and never runs person-linkage matching (e.g.
+    -- RISOS VoterHistory) — run_pipeline.py stops after that file type's
+    -- own transform step and never touches RILDS_STAGE/WINNERS/matching.
+    matches_dataset     BOOLEAN      NOT NULL DEFAULT TRUE,
+    updated_at          TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    PRIMARY KEY (folder_name, file_glob)
 );
+
+-- Existing deployments created this table with folder_name as the sole
+-- PRIMARY KEY and no matches_dataset column — a PRIMARY KEY can't be
+-- altered in place in Snowflake, so an already-deployed table needs to be
+-- dropped and recreated (safe: every row here is regenerated idempotently
+-- from config/providers/*.yaml, nothing hand-authored is ever stored here).
+-- CREATE TABLE IF NOT EXISTS above is a no-op against such a table, so
+-- run this once by hand when upgrading a pre-existing deployment:
+--   DROP TABLE PROVIDER_FOLDER_MAP;
+--   -- then re-run this file, then re-run config_bridge.py's generated MERGE.
 
 -- Tracks which staged files have already been processed, so the polling
 -- Task never reprocesses a file it already ran.

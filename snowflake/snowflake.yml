@@ -73,3 +73,17 @@ entities:
       - src: python
         dest: python
     stage: MATCHBOT_DEPLOY_STAGE
+
+  register_jaro_winkler_udf:
+    type: procedure
+    handler: matchbot_snowflake.procedures.run_pipeline.register_jaro_winkler_udf
+    signature: []
+    returns: string
+    runtime: "3.11"
+    # No matchbot artifact needed here — register_jaro_winkler_udf only uses
+    # jellyfish (see the function body), never imports matchbot. Same
+    # deploy-once-manually pattern as register_metaphone_udf above.
+    artifacts:
+      - src: python
+        dest: python
+    stage: MATCHBOT_DEPLOY_STAGE

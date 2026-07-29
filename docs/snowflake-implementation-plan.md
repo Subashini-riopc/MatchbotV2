@@ -1,5 +1,13 @@
 # Snowflake-native MatchBot demo — implementation plan
 
+> **Update:** the "explicitly out of scope" fuzzy/phonetic matching below
+> was later brought into scope — a fuzzy tier (name+address Jaro-Winkler
+> scoring, weighted corroborating signals, accept/review-band routing) now
+> exists on both AWS and Snowflake. See `snowflake/README.md`'s "Scope"
+> section for the current, up-to-date matcher chain description; this
+> document is left as-is below as the historical record of the original
+> exact-match-only scoping decision.
+
 ## Context
 
 MatchBot's matching pipeline already runs on AWS two ways (Glue, ECS/Fargate), both against Postgres, both driven by the same Python core (`Orchestrator` → `ParseStage` → `CanonicalStage` → `CleanseStage` → `MatchStage`). The client wants to evaluate a second option before committing: a fully Snowflake-native version of the same demo, so they can compare the two and decide which platform to go with.

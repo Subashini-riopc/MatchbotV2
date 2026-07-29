@@ -89,11 +89,19 @@ def _identity_columns() -> list[Column[Any]]:
         # decision has been made to drop it outright.
         Column("lasid", String(50)),
         Column("ssn", String(11)),
+        # Last 4 digits of ssn, derived (matching/derive.py::add_derived_columns) —
+        # backs the deterministic_name_ssn4 and fuzzy_name_addr_combined matchers.
+        Column("ssn4", String(4)),
         Column("address1", String(200)),
+        # Standardized address1, derived — backs the name+address matcher
+        # tiers (deterministic_name_addr_full through deterministic_fn_addr).
+        Column("address1_std", String(200)),
         Column("address2", String(200)),
         Column("city", String(100)),
         Column("state", String(20)),
         Column("zip", String(20)),
+        # zip truncated to 5 digits, derived — same matcher tiers as address1_std.
+        Column("zip5", String(5)),
     ]
 
 
@@ -295,10 +303,15 @@ def build_metadata(schema: str) -> MetaData:
         # how multi-address persons were resolved to a single row on load).
         Column("address_source", String(100)),  # originating source table name
         Column("address1", String(200)),
+        # Standardized address1, for the name+address matcher tiers — same
+        # "assumed precomputed upstream" contract as first_name_std/
+        # last_name_std above, not derived by this pipeline.
+        Column("address1_std", String(200)),
         Column("address2", String(200)),
         Column("city", String(100)),
         Column("state", String(20)),
         Column("zip", String(20)),
+        Column("zip5", String(5)),  # zip truncated to 5 digits; same contract as address1_std
     )
 
     return md

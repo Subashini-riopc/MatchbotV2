@@ -11,6 +11,9 @@ STD = StandardizationConfig(
     gender_map={"F": "FEMALE", "M": "MALE", "NB": "NONBINARY"},
     name_suffixes=["JR", "SR", "III"],
     name_prefixes=["MR", "DR"],
+    address_abbreviations={
+        "STREET": "ST", "AVENUE": "AVE", "APARTMENT": "APT", "NORTH": "N",
+    },
 )
 
 
@@ -67,3 +70,40 @@ def test_metaphone_and_jaro() -> None:
     assert S.metaphone("Contreras") == S.metaphone("contreras")
     assert S.jaro_winkler("MARY", "MARI") > 0.8
     assert S.jaro_winkler("MARY", None) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("123 Main Street", "123 MAIN ST"),
+        ("456 North Oak Avenue Apartment 2", "456 N OAK AVE APT 2"),
+        ("  789 Elm St  ", "789 ELM ST"),  # already-abbreviated tokens pass through unchanged
+        ("", None),
+        (None, None),
+    ],
+)
+def test_std_address(raw: str | None, expected: str | None) -> None:
+    assert S.std_address(raw, STD) == expected
+
+
+def test_std_address_does_not_corrupt_substrings() -> None:
+    """A token-level abbreviation match must not corrupt an unrelated word
+    that merely contains the same substring (e.g. 'EAST' -> 'E' must not
+    also rewrite a town/street name like 'EASTON')."""
+    std = StandardizationConfig(address_abbreviations={"EAST": "E"})
+    assert S.std_address("EASTON AVE", std) == "EASTON AVE"
+    assert S.std_address("123 EAST AVE", std) == "123 E AVE"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("02901", "02901"),
+        ("02901-1234", "02901"),  # ZIP+4 suffix dropped
+        ("0290", None),  # fewer than 5 digits
+        ("", None),
+        (None, None),
+    ],
+)
+def test_std_zip(raw: str | None, expected: str | None) -> None:
+    assert S.std_zip(raw) == expected

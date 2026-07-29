@@ -46,6 +46,7 @@ FOLDER_TO_PROVIDER: dict[str, str] = {
     "dlt_ui":          "dlt_ui",
     "bhddh":           "bhddh",
     "dcyf":            "dcyf",
+    "risos_voter":     "risos_voter",
 }
 
 # ---------------------------------------------------------------------------
@@ -57,6 +58,7 @@ PROVIDER_GLOB: dict[str, str] = {
     "dlt_ui":          "dlt_ui_*.csv",
     "bhddh":           "bhddh_*.csv",
     "dcyf":            "dcyf_*.csv",
+    "risos_voter":     "Voter_*.txt",
 }
 
 

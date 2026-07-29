@@ -38,7 +38,11 @@ class MatcherSqlFragment:
         never hand-numbered here.
     join_predicate_sql:
         The ON-clause condition joining a staged row (aliased ``s``) to a
-        candidate reference row (aliased ``r``) for this matcher.
+        candidate reference row (aliased ``r``) for this matcher. For a
+        deterministic matcher this is the full exact-equality condition; for
+        a fuzzy matcher this is the (cheap, selective) narrowing condition
+        used to avoid a full cross join — see matchers/fuzzy.py — not the
+        fuzzy comparison itself, which lives in score_sql instead.
     guard_predicate_sql:
         A WHERE-clause condition that must hold for the staged row before
         this matcher's join is considered at all — mirrors
@@ -48,6 +52,19 @@ class MatcherSqlFragment:
     method_label:
         The value written to rilds_matched.match_method / vocab.py's
         method_to_db() output for this matcher (e.g. 'EXACT_SASID', 'EXACT').
+    score_sql:
+        A SQL expression (evaluated per stage/candidate row pair, alias
+        ``s``/``r`` in scope) producing this pair's match score in [0, 1].
+        Deterministic matchers hardcode ``'1.0'`` (every join match is a
+        certain accept, no partial credit). Fuzzy matchers compute a real
+        weighted score here — see matchers/fuzzy.py.
+    accept_threshold / review_threshold:
+        Score bands for fuzzy matchers: score >= accept_threshold is a
+        confirmed match; review_threshold <= score < accept_threshold is
+        flagged for manual review (RILDS_ERROR, decision=LOW_CONFIDENCE);
+        below review_threshold is not a candidate at all. Deterministic
+        matchers use 1.0/1.0 (score is always exactly 1.0 or the row never
+        appears as a candidate, since the join is exact-equality only).
     """
 
     name: str
@@ -55,16 +72,38 @@ class MatcherSqlFragment:
     join_predicate_sql: str
     guard_predicate_sql: str
     method_label: str
+    score_sql: str = "1.0"
+    accept_threshold: float = 1.0
+    review_threshold: float = 1.0
+
+
+@dataclass(slots=True, frozen=True)
+class _BuiltFragment:
+    """What a registered builder returns for one MatcherSpec — everything
+    MatcherSqlFragment needs except ``name``/``priority``, which
+    build_sql_fragments fills in from the spec/chain position itself.
+    score_sql/accept_threshold/review_threshold default to the
+    always-1.0/always-exact values so existing deterministic builders (which
+    only ever produce a certain accept-or-nothing join) don't need to name
+    them explicitly.
+    """
+
+    join_predicate_sql: str
+    guard_predicate_sql: str
+    method_label: str
+    score_sql: str = "1.0"
+    accept_threshold: float = 1.0
+    review_threshold: float = 1.0
 
 
 _SQL_REGISTRY: dict[str, "_FragmentBuilder"] = {}
 
 # A registered builder takes a MatcherSpec plus the current provider's
 # external_id_column (e.g. 'sasid' for RIDE, 'ccri_id' for another provider
-# — see ProviderConfig.external_id_column) and returns the (join, guard,
-# method_label) triple for ONE matcher. external_id_column is needed
-# because the generic 'rilds_id' key only exists as a real, same-named
-# column on the STAGE side (rilds_stage.rilds_id, populated generically by
+# — see ProviderConfig.external_id_column) and returns a _BuiltFragment for
+# ONE matcher. external_id_column is needed because the generic 'rilds_id'
+# key only exists as a real, same-named column on the STAGE side
+# (rilds_stage.rilds_id, populated generically by
 # provider_sql.py/cleanse.py); on the REFERENCE side there is no rilds_id
 # column at all — the real Postgres pipeline resolves it dynamically per
 # provider (storage/postgres.py: d["rilds_id"] = d.get(external_id_column)),
@@ -73,7 +112,7 @@ _SQL_REGISTRY: dict[str, "_FragmentBuilder"] = {}
 # R.RILDS_ID' against RILDS_REFERENCE, which only has a SASID column).
 # Priority is assigned separately by build_sql_fragments, since it depends
 # on chain position, not the spec alone.
-_FragmentBuilder = Callable[["MatcherSpec", str], tuple[str, str, str]]
+_FragmentBuilder = Callable[["MatcherSpec", str], _BuiltFragment]
 
 
 def register_sql_matcher(type_name: str) -> Callable[[_FragmentBuilder], _FragmentBuilder]:
@@ -107,6 +146,7 @@ def build_sql_fragments(
     # Import for side-effect registration of built-in SQL matcher types,
     # same lazy-import-for-registration pattern as matching/base.py.
     from matchbot_snowflake.matchers import deterministic  # noqa: F401
+    from matchbot_snowflake.matchers import fuzzy  # noqa: F401
 
     fragments: list[MatcherSqlFragment] = []
     priority = 0
@@ -122,14 +162,17 @@ def build_sql_fragments(
                 f"Unknown SQL matcher type {spec.type!r} for {spec.name!r}. "
                 f"Registered types: {known}"
             ) from None
-        join_sql, guard_sql, method_label = builder(spec, external_id_column)
+        built = builder(spec, external_id_column)
         fragments.append(
             MatcherSqlFragment(
                 name=spec.name,
                 priority=priority,
-                join_predicate_sql=join_sql,
-                guard_predicate_sql=guard_sql,
-                method_label=method_label,
+                join_predicate_sql=built.join_predicate_sql,
+                guard_predicate_sql=built.guard_predicate_sql,
+                method_label=built.method_label,
+                score_sql=built.score_sql,
+                accept_threshold=built.accept_threshold,
+                review_threshold=built.review_threshold,
             )
         )
     return fragments

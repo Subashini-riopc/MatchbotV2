@@ -224,3 +224,11 @@ __marimo__/
 # never committed; regenerate locally via
 # python -m matchbot_snowflake.export.export_rilds_reference)
 snowflake/data/
+
+# RSA key pair for Snowflake key-pair auth (Lambda service account) — the
+# private key must never be committed. Regenerate via:
+#   openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -out rsa_key.p8 -nocrypt
+#   openssl rsa -in rsa_key.p8 -pubout -out rsa_key.pub
+snowflake/.secrets/
+*.p8
+*.pem

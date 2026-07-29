@@ -21,8 +21,11 @@ from matchbot_snowflake.derive_sql import (
     birth_parts_sql,
     last_name8_sql,
     metaphone_sql,
+    ssn4_sql,
+    std_address_sql,
     std_gender_sql,
     std_name_sql,
+    std_zip_sql,
 )
 
 
@@ -219,9 +222,12 @@ SELECT
     rilds_id,
     lasid,
     ssn,
+    {ssn4_sql('ssn')} AS ssn4,
     address1,
+    {std_address_sql('address1', std_config)} AS address1_std,
     address2,
     city,
     state,
-    zip
+    zip,
+    {std_zip_sql('zip')} AS zip5
 FROM derived"""

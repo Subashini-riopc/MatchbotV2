@@ -21,16 +21,21 @@ from matchbot_snowflake.config_models import AppConfig, ProviderConfig, load_con
 
 
 def provider_folder_name(provider: ProviderConfig) -> str:
-    """The S3 folder segment this provider's files land under.
+    """The S3 folder segment this file type's files land under.
 
-    Today this is always provider_id — see module docstring.
+    provider.s3_folder if explicitly set (required for a multi_file
+    provider's second+ file type, whose own provider_id is NOT the shared
+    folder — e.g. risos_voterhistory's files land under risos_voter, not
+    risos_voterhistory), else provider_id (true for every single-file-type
+    provider so far, and for a multi_file provider's first/primary file
+    type).
     """
-    return provider.provider_id
+    return provider.s3_folder or provider.provider_id
 
 
-def build_provider_folder_map_rows(app_config: AppConfig) -> list[dict[str, str | None]]:
+def build_provider_folder_map_rows(app_config: AppConfig) -> list[dict[str, str | bool | None]]:
     """One row per configured provider, shaped for PROVIDER_FOLDER_MAP."""
-    rows: list[dict[str, str | None]] = []
+    rows: list[dict[str, str | bool | None]] = []
     for provider in app_config.providers.values():
         rows.append(
             {
@@ -40,24 +45,35 @@ def build_provider_folder_map_rows(app_config: AppConfig) -> list[dict[str, str 
                 "dataset_name": provider.dataset_name,
                 "file_glob": provider.file_glob,
                 "external_id_column": provider.external_id_column,
+                "delimiter": provider.delimiter,
+                "multi_file": provider.multi_file,
+                "matches_dataset": provider.matches_dataset,
             }
         )
     return rows
 
 
-def render_merge_sql(rows: list[dict[str, str | None]]) -> str:
+def render_merge_sql(rows: list[dict[str, str | bool | None]]) -> str:
     """Render one idempotent MERGE INTO statement for all provider rows.
 
     A MERGE (not a plain INSERT) so re-running this after a provider's YAML
     changes updates the existing row rather than erroring on the
-    folder_name primary key, or leaving a stale row behind.
+    (folder_name, file_glob) primary key, or leaving a stale row behind.
+
+    Keyed on (folder_name, file_glob) rather than folder_name alone: a
+    multi_file provider (e.g. RISOS) has more than one ProviderConfig
+    sharing one folder_name, each distinguished by its own file_glob —
+    run_pipeline.py resolves which row applies to an incoming file by
+    matching its filename against file_glob, not folder_name alone.
     """
     if not rows:
         return "-- no providers configured; nothing to merge"
 
-    def _sql_literal(value: str | None) -> str:
+    def _sql_literal(value: str | bool | None) -> str:
         if value is None:
             return "NULL"
+        if isinstance(value, bool):
+            return "TRUE" if value else "FALSE"
         return "'" + value.replace("'", "''") + "'"
 
     values_rows = []
@@ -73,6 +89,9 @@ def render_merge_sql(rows: list[dict[str, str | None]]) -> str:
                     "dataset_name",
                     "file_glob",
                     "external_id_column",
+                    "delimiter",
+                    "multi_file",
+                    "matches_dataset",
                 )
             )
             + ")"
@@ -84,21 +103,23 @@ def render_merge_sql(rows: list[dict[str, str | None]]) -> str:
 USING (
     SELECT * FROM VALUES
     {values_clause}
-    AS src(folder_name, provider_id, provider_code, dataset_name, file_glob, external_id_column)
+    AS src(folder_name, provider_id, provider_code, dataset_name, file_glob, external_id_column, delimiter, multi_file, matches_dataset)
 ) AS source
-ON target.folder_name = source.folder_name
+ON target.folder_name = source.folder_name AND target.file_glob = source.file_glob
 WHEN MATCHED THEN UPDATE SET
     provider_id = source.provider_id,
     provider_code = source.provider_code,
     dataset_name = source.dataset_name,
-    file_glob = source.file_glob,
     external_id_column = source.external_id_column,
+    delimiter = source.delimiter,
+    multi_file = source.multi_file,
+    matches_dataset = source.matches_dataset,
     updated_at = CURRENT_TIMESTAMP()
 WHEN NOT MATCHED THEN INSERT (
-    folder_name, provider_id, provider_code, dataset_name, file_glob, external_id_column
+    folder_name, provider_id, provider_code, dataset_name, file_glob, external_id_column, delimiter, multi_file, matches_dataset
 ) VALUES (
     source.folder_name, source.provider_id, source.provider_code,
-    source.dataset_name, source.file_glob, source.external_id_column
+    source.dataset_name, source.file_glob, source.external_id_column, source.delimiter, source.multi_file, source.matches_dataset
 );"""
 
 

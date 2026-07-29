@@ -37,6 +37,24 @@ standardization:
     "X": NONBINARY
   name_suffixes: [JR, SR, II, III, IV, V, VI, ESQ]
   name_prefixes: [MR, MRS, MS, DR]
+  # Street-suffix/directional abbreviations for address standardization
+  # (std_address) — applied as whole-token replacements after uppercasing,
+  # so "Main Street" and "Main St" compare equal. USPS-style abbreviations.
+  address_abbreviations:
+    STREET: ST
+    AVENUE: AVE
+    BOULEVARD: BLVD
+    DRIVE: DR
+    LANE: LN
+    ROAD: RD
+    COURT: CT
+    PLACE: PL
+    APARTMENT: APT
+    SUITE: STE
+    NORTH: N
+    SOUTH: S
+    EAST: E
+    WEST: W
 
 # --- Matching ----------------------------------------------------------------
 matching:
@@ -86,15 +104,128 @@ matching:
       type: deterministic
       keys: [ssn]
 
+    # Partial SSN (last 4 digits) isn't unique alone, but paired with both
+    # full names it's a trustworthy signal — placed above name+DOB since SSN
+    # is a stable identifier that doesn't drift with formatting the way
+    # names/addresses do.
+    - name: deterministic_name_ssn4
+      type: deterministic
+      keys: [first_name_std, last_name_std, ssn4]
+
     # Standardized name columns (suffixes/prefixes like JR, SR, DR stripped)
     # so exact comparison isn't defeated by formatting differences alone.
     - name: deterministic_name_dob
       type: deterministic
       keys: [first_name_std, last_name_std, birth_date]
 
+    # --- Address tiers, strict -> loose. Each requires both names exact;
+    # only the address-field combination varies. Ordered so a record is
+    # always matched at the strictest address tier its data supports —
+    # dropping city/state before zip (city/state are the noisier,
+    # formatting-prone fields; zip is the cleaner anchor). Deliberately no
+    # last_name+address-only tier (household collision risk: spouses/family
+    # commonly share both last name and address) and no zip-only tier (too
+    # loose for an exact match — see docs/snowflake-implementation-plan.md
+    # matching-logic discussion).
+    - name: deterministic_name_addr_full
+      type: deterministic
+      keys: [first_name_std, last_name_std, address1_std, city, state, zip5]
+
+    - name: deterministic_name_addr_city_state
+      type: deterministic
+      keys: [first_name_std, last_name_std, address1_std, city, state]
+
+    - name: deterministic_name_addr_street_zip
+      type: deterministic
+      keys: [first_name_std, last_name_std, address1_std, zip5]
+
     - name: deterministic_name_addr
       type: deterministic
-      keys: [first_name_std, last_name_std, address1]
+      keys: [first_name_std, last_name_std, address1_std]
+
+    # Last-resort exact tier: first name + address only (no last name). Only
+    # ever reached by records with no last-name/address geographic anchor
+    # available at all — every stricter tier above already requires last
+    # name, so this only fires when those have nothing to work with.
+    - name: deterministic_fn_addr
+      type: deterministic
+      keys: [first_name_std, address1_std, state, zip5]
+
+    # --- Fuzzy tier. Only reached if every exact rule above fails. Each
+    # scores similarity in [0,1]; score >= accept_threshold matches,
+    # review_threshold <= score < accept_threshold is flagged for manual
+    # review (routed to rilds_error with decision=LOW_CONFIDENCE), below
+    # review_threshold is no match. Ordered from safest (one side held
+    # exact) to least safe (nothing held exact).
+    - name: fuzzy_name_exact_addr
+      type: fuzzy
+      accept_threshold: 0.8
+      review_threshold: 0.6
+      comparisons:
+        - attribute: first_name_std
+          method: jaro_winkler
+          weight: 45
+          threshold: 0.80
+        - attribute: last_name_std
+          method: jaro_winkler
+          weight: 55
+          threshold: 0.80
+        - attribute: address1_std
+          method: exact
+          weight: 100
+          threshold: 1.0
+        - attribute: zip5
+          method: exact
+          weight: 100
+          threshold: 1.0
+
+    - name: fuzzy_exact_name_addr
+      type: fuzzy
+      accept_threshold: 0.8
+      review_threshold: 0.6
+      comparisons:
+        - attribute: first_name_std
+          method: exact
+          weight: 50
+          threshold: 1.0
+        - attribute: last_name_std
+          method: exact
+          weight: 50
+          threshold: 1.0
+        - attribute: address1_std
+          method: jaro_winkler
+          weight: 100
+          threshold: 0.80
+
+    - name: fuzzy_name_addr_combined
+      type: fuzzy
+      accept_threshold: 0.75
+      review_threshold: 0.6
+      comparisons:
+        - attribute: first_name_std
+          method: jaro_winkler
+          weight: 20
+          threshold: 0.80
+        - attribute: last_name_std
+          method: jaro_winkler
+          weight: 25
+          threshold: 0.80
+        - attribute: address1_std
+          method: jaro_winkler
+          weight: 20
+          threshold: 0.80
+        - attribute: zip5
+          method: exact
+          weight: 15
+          threshold: 1.0
+        - attribute: birth_date
+          method: exact
+          weight: 15
+          threshold: 1.0
+        - attribute: ssn4
+          method: exact
+          weight: 20
+          threshold: 1.0
 
 # --- Data-quality rules (evaluated during cleanse; recorded as metrics) ------
 dq_rules:

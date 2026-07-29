@@ -74,11 +74,84 @@ DATA_LINE_FORMAT = "RAW_LINE_FORMAT_SKIP_HEADER"
 # ragged-row detection and the actual land-table load — see this module's
 # docstring for why the raw single-column format's manual comma-counting
 # can't be used for either of those two steps.
+#
+# Comma remains the default (matches RIDE), but this is NOT the only shape
+# in use: RISOS's file is pipe-delimited, so its file format differs (see
+# PIPE_PROVIDER_FORMAT in snowflake/ddl/02_file_format_and_stage.sql).
+# csv_format_for_delimiter() below picks the right one per provider — the
+# caller (run_pipeline.py) passes provider.delimiter through rather than
+# relying on this default for every provider.
 DATA_CSV_FORMAT = "MATCHBOT_CSV_PROVIDER_FORMAT"
 
+# Maps a provider's configured delimiter (ProviderConfig.delimiter) to the
+# Snowflake file format object shaped for it. Add an entry here (and a
+# matching CREATE FILE FORMAT in the DDL) when a new provider uses a
+# delimiter neither of these covers.
+_DELIMITER_TO_CSV_FORMAT = {
+    ",": "MATCHBOT_CSV_PROVIDER_FORMAT",
+    "|": "MATCHBOT_PIPE_PROVIDER_FORMAT",
+}
 
-def land_table_name(provider_code: str) -> str:
-    """The per-provider land table name, e.g. 'ride' -> 'RIDE_LAND'."""
+
+def csv_format_for_delimiter(delimiter: str) -> str:
+    """The Snowflake file format object name for a provider's delimiter.
+
+    Raises on an unconfigured delimiter rather than silently falling back to
+    comma — a wrong-but-valid file format would still "succeed" while
+    mis-splitting every row (the exact failure mode this function exists to
+    prevent for a provider like RISOS).
+    """
+    try:
+        return _DELIMITER_TO_CSV_FORMAT[delimiter]
+    except KeyError:
+        raise ValueError(
+            f"no Snowflake file format configured for delimiter {delimiter!r}; "
+            f"add one to _DELIMITER_TO_CSV_FORMAT and snowflake/ddl/02_file_format_and_stage.sql"
+        ) from None
+
+
+# Matches ONE trailing date/period/sequence segment on a file stem, e.g.
+# "_032026", "_2026-07-09", "-2026-07-09", "_20260709". Applied repeatedly
+# (not just once) since a stem can have more than one such segment
+# (ride_enrollment_2026-07-09 has a single hyphenated date segment here,
+# but a future file could plausibly have "_v2_2026-07-09" etc.) — see
+# file_type_from_filename's loop.
+_TRAILING_DATE_OR_NUMBER_RE = re.compile(r"[_-][0-9]{2,}([_-][0-9]{2,})*$")
+
+
+def file_type_from_filename(filename: str) -> str:
+    """The file-type token used in the land table name, e.g.
+    'Voter_032026.txt' -> 'VOTER', 'VoterHistory_032026.txt' -> 'VOTERHISTORY',
+    'ride_enrollment_2026-07-09.csv' -> 'RIDE_ENROLLMENT'.
+
+    A single provider can ship several structurally different files (RISOS
+    sends voter registration and voter history separately, with unrelated
+    columns) — one table per PROVIDER alone would mean the second file type
+    either collides with the first table's shape or silently no-ops against
+    it (CREATE TABLE IF NOT EXISTS does nothing once a table of that name
+    already exists, so the differently-shaped file's INSERT then fails on
+    missing columns — the exact bug this function fixes). Stripping the
+    trailing date/sequence run (e.g. _032026, _2026-07-09) keeps the table
+    name stable across a provider's routine periodic drops of the same file
+    type, without needing a config entry per file.
+    """
+    stem = filename.rsplit("/", 1)[-1]
+    stem = re.sub(r"\.[A-Za-z0-9]+$", "", stem)  # drop extension
+    stem = _TRAILING_DATE_OR_NUMBER_RE.sub("", stem)
+    return _sanitize_column_name(stem)
+
+
+def land_table_name(provider_code: str, file_type: str | None = None) -> str:
+    """The land table name for a provider (+ optional file type).
+
+    'ride' -> 'RIDE_LAND' (single file type, back-compat: RIDE_LAND already
+    exists in deployed accounts under this name).
+    ('risos', 'VOTER') -> 'RISOS_VOTER_LAND'; ('risos', 'VOTERHISTORY') ->
+    'RISOS_VOTERHISTORY_LAND' — distinct tables per file shape, all still
+    prefixed with the provider code so they're identifiable as RISOS's.
+    """
+    if file_type:
+        return f"{provider_code.upper()}_{file_type.upper()}_LAND"
     return f"{provider_code.upper()}_LAND"
 
 
@@ -123,7 +196,10 @@ def parse_header_columns(header_line: str, delimiter: str = ",") -> list[str]:
 
 
 def fetch_header_columns(
-    session: "Session", stage_file_path: str, raw_line_format: str = HEADER_LINE_FORMAT
+    session: "Session",
+    stage_file_path: str,
+    raw_line_format: str = HEADER_LINE_FORMAT,
+    delimiter: str = ",",
 ) -> list[str]:
     """Read the real header row directly off the staged file and return its
     sanitized column names — the Snowflake-side source of the same
@@ -131,7 +207,11 @@ def fetch_header_columns(
 
     HEADER_LINE_FORMAT (RAW_LINE_FORMAT_WITH_HEADER) has SKIP_HEADER=0, so
     the header row itself is readable here as plain text — the opposite of
-    CSV_PROVIDER_FORMAT and DATA_LINE_FORMAT, which both skip it.
+    CSV_PROVIDER_FORMAT and DATA_LINE_FORMAT, which both skip it. This raw
+    line format's own FIELD_DELIMITER is NONE regardless of the provider
+    (see snowflake/ddl/02_file_format_and_stage.sql), so it always returns
+    the whole header line undivided — ``delimiter`` (ProviderConfig.delimiter,
+    e.g. "|" for RISOS) is only used here, in Python, to split that line.
     """
     result = session.sql(
         f"""
@@ -143,15 +223,27 @@ def fetch_header_columns(
     ).collect()
     if not result:
         raise ValueError(f"Could not read header row from {stage_file_path}")
-    return parse_header_columns(result[0]["HEADER_LINE"])
+    return parse_header_columns(result[0]["HEADER_LINE"], delimiter=delimiter)
 
 
-def render_create_land_table_sql(provider_code: str, header_columns: list[str]) -> str:
-    """CREATE TABLE IF NOT EXISTS <PROVIDER>_LAND (...), one VARCHAR column
-    per header column, in source order — mirrors build_land_table() exactly:
-    provenance columns first/last, every source column stored as raw text.
+def render_create_land_table_sql(
+    provider_code: str, header_columns: list[str], file_type: str | None = None
+) -> str:
+    """CREATE TABLE IF NOT EXISTS <PROVIDER>[_<FILE_TYPE>]_LAND (...), one
+    VARCHAR column per header column, in source order — mirrors
+    build_land_table() exactly: provenance columns first/last, every source
+    column stored as raw text.
+
+    IF NOT EXISTS only covers a table that has never been created before —
+    it does NOT add columns to a same-named table created by an earlier,
+    differently-shaped file (that's what caused RISOS's VoterHistory load to
+    fail: RISOS_LAND already existed, shaped for the voter-registration
+    file, so VoterHistory's INSERT referenced columns like DATE_1 that were
+    never in that table). Callers must pair this with
+    render_add_missing_columns_sql for a table that might already exist in
+    a different shape — see run_pipeline.py.
     """
-    table_name = land_table_name(provider_code)
+    table_name = land_table_name(provider_code, file_type)
     column_lines = ",\n    ".join(f"{col} VARCHAR" for col in header_columns)
     return f"""CREATE TABLE IF NOT EXISTS {table_name} (
     id                NUMBER IDENTITY PRIMARY KEY,
@@ -160,6 +252,34 @@ def render_create_land_table_sql(provider_code: str, header_columns: list[str]) 
     {column_lines},
     created_at        TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 )"""
+
+
+def render_add_missing_columns_sql(
+    provider_code: str,
+    header_columns: list[str],
+    existing_columns: set[str],
+    file_type: str | None = None,
+) -> list[str]:
+    """ALTER TABLE ... ADD COLUMN IF NOT EXISTS for any header column not
+    already on the table — lets a file type's schema evolve (e.g. RISOS
+    adds a new field to VoterHistory next year) without losing history:
+    old rows simply have NULL in the newly added column. Never drops or
+    renames a column, even if a later file omits one the table already
+    has — that column just stays NULL for this run's rows, same as any
+    other column this file's header didn't map.
+
+    Returns a list of statements (one ALTER per missing column) rather than
+    one combined ALTER ... ADD COLUMN (a, b, c) — simpler to reason about
+    and matches how render_create_land_table_sql etc. are executed
+    one-statement-at-a-time by run_pipeline.py. Empty list (no statements)
+    when every header column already exists on the table.
+    """
+    table_name = land_table_name(provider_code, file_type)
+    missing = [col for col in header_columns if col not in existing_columns]
+    return [
+        f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {col} VARCHAR"
+        for col in missing
+    ]
 
 
 def render_reject_ragged_rows_sql(
@@ -204,17 +324,18 @@ def render_load_clean_rows_sql(
     stage_file_path: str,
     header_columns: list[str],
     csv_format: str = DATA_CSV_FORMAT,
+    file_type: str | None = None,
 ) -> str:
-    """INSERT INTO <PROVIDER>_LAND, reading straight off the stage via
-    CSV_PROVIDER_FORMAT's real, quote-aware parsing ($1..$N positional
-    columns) — column count and target table both driven entirely by
-    header_columns, never hardcoded.
+    """INSERT INTO <PROVIDER>[_<FILE_TYPE>]_LAND, reading straight off the
+    stage via CSV_PROVIDER_FORMAT's real, quote-aware parsing ($1..$N
+    positional columns) — column count and target table both driven
+    entirely by header_columns, never hardcoded.
 
     Excludes rows where data spills past the expected column count (see
     render_reject_ragged_rows_sql) — those already went to
     RILDS_LAND_REJECTS instead.
     """
-    land_table = land_table_name(provider_code)
+    land_table = land_table_name(provider_code, file_type)
     expected_field_count = len(header_columns)
     column_list = ", ".join(header_columns)
     positional_columns = ",\n    ".join(f"${i}" for i in range(1, expected_field_count + 1))
@@ -231,7 +352,12 @@ FROM @{stage_file_path}
 WHERE {overflow_col} IS NULL"""
 
 
-def render_file_profile_sql(provider_code: str, pipeline_run_id: int, header_columns: list[str]) -> str:
+def render_file_profile_sql(
+    provider_code: str,
+    pipeline_run_id: int,
+    header_columns: list[str],
+    file_type: str | None = None,
+) -> str:
     """One row per header_columns entry: null/blank count for that column,
     scoped to this run's rows in the land table. The Snowflake-side
     equivalent of matchbot.pipeline.parse::_profile_file's null_counts —
@@ -246,7 +372,7 @@ def render_file_profile_sql(provider_code: str, pipeline_run_id: int, header_col
     a tall (column_name, null_count) shape needs no such thing and is
     just as easy to render in an email.
     """
-    land_table = land_table_name(provider_code)
+    land_table = land_table_name(provider_code, file_type)
     per_column = "\nUNION ALL\n".join(
         f"SELECT '{col}' AS column_name, "
         f"COUNT_IF({col} IS NULL OR TRIM({col}) = '') AS null_count "
@@ -256,7 +382,12 @@ def render_file_profile_sql(provider_code: str, pipeline_run_id: int, header_col
     return per_column
 
 
-def render_duplicate_row_count_sql(provider_code: str, pipeline_run_id: int, header_columns: list[str]) -> str:
+def render_duplicate_row_count_sql(
+    provider_code: str,
+    pipeline_run_id: int,
+    header_columns: list[str],
+    file_type: str | None = None,
+) -> str:
     """Count of rows in this run's landed rows that are exact duplicates of
     another row on that same run — i.e. sum over (group size - 1) for
     every group of 2+ identical rows, matching parse.py::_profile_file's
@@ -276,7 +407,7 @@ def render_duplicate_row_count_sql(provider_code: str, pipeline_run_id: int, hea
     side's Polars-based duplicate check treats identical-including-null
     rows as duplicates of each other.
     """
-    land_table = land_table_name(provider_code)
+    land_table = land_table_name(provider_code, file_type)
     column_list = ", ".join(header_columns)
     return f"""SELECT COALESCE(SUM(group_size - 1), 0)
 FROM (

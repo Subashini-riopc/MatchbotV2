@@ -88,3 +88,100 @@ def test_ride_chain_filters_to_sasid_only(app_config: AppConfig) -> None:
     mapped_attributes = set(provider.column_mappings.values())
     chain = filter_chain_by_provider_attributes(g.matching.matchers, mapped_attributes)
     assert [m.name for m in chain] == ["deterministic_external_id"]
+
+
+def test_full_chain_prefers_strict_exact_over_fuzzy(app_config: AppConfig) -> None:
+    """A record that clears an exact address tier must be matched by that
+    exact rule, never fall through to the (looser, lower-priority) fuzzy
+    tier — the core safety property of the strict-to-loose cascade."""
+    g = app_config.global_config
+    matchers = build_matchers(g.matching.matchers, g.standardization)
+
+    record = {
+        "first_name_std": "ROBERT", "last_name_std": "SMITH",
+        "address1_std": "123 MAIN ST", "city": "PROVIDENCE", "state": "RI", "zip5": "02901",
+    }
+    # A candidate that matches exactly on the full-address tier (rule 5)
+    # AND would also score well under the fuzzy tiers below it — the exact
+    # rule must win since it's tried first.
+    candidates = [{
+        "idcol_id": "1",
+        "first_name_std": "ROBERT", "last_name_std": "SMITH",
+        "address1_std": "123 MAIN ST", "city": "PROVIDENCE", "state": "RI", "zip5": "02901",
+    }]
+
+    for m in matchers:
+        out = m.match(record, candidates)
+        if out.decision in (MatchDecision.MATCHED, MatchDecision.AMBIGUOUS):
+            assert m.name == "deterministic_name_addr_full"
+            assert out.decision is MatchDecision.MATCHED
+            assert out.score == 1.0
+            return
+    raise AssertionError("expected the full-address exact tier to match")
+
+
+def test_fuzzy_exact_addr_tier_reached_when_names_and_address_are_close_but_not_exact(
+    app_config: AppConfig,
+) -> None:
+    """A record with an exact zip5 match, a non-exact address1_std, and a
+    close-but-not-exact first name must fall through every exact tier
+    (none of which tolerate a non-exact field) to fuzzy_name_exact_addr
+    (rule 10) — and land in the review band there, since the failed
+    address1_std comparison brings its weighted score (0.667) below that
+    rule's own 0.8 accept_threshold but above its 0.6 review_threshold."""
+    g = app_config.global_config
+    matchers = build_matchers(g.matching.matchers, g.standardization)
+
+    record = {
+        "first_name_std": "KATHERINE", "last_name_std": "NGUYEN",
+        "address1_std": "78 OAK AVE APT 2B", "zip5": "02909",
+    }
+    candidates = [{
+        "idcol_id": "7734",
+        "first_name_std": "KATRINA", "last_name_std": "NGUYEN",
+        "address1_std": "78 OAK AVE UNIT 2", "zip5": "02909",
+    }]
+
+    for m in matchers:
+        out = m.match(record, candidates)
+        if out.decision in (MatchDecision.MATCHED, MatchDecision.AMBIGUOUS):
+            assert m.name == "fuzzy_name_exact_addr"
+            assert out.decision is MatchDecision.AMBIGUOUS
+            assert 0.6 <= out.score < 0.8
+            return
+    raise AssertionError("expected fuzzy_name_exact_addr to flag this record for review")
+
+
+def test_fuzzy_combined_tier_reached_when_no_field_is_exact(app_config: AppConfig) -> None:
+    """A record with a dissimilar address (jaro_winkler ~0.52, clears
+    neither rule 10's nor rule 11's 0.8 address threshold) and a differing
+    zip5 must fall through every exact tier AND both partially-exact fuzzy
+    tiers (10/11 each score too low even for their own review_threshold,
+    since neither retains a full exact/high-scoring side) to reach
+    fuzzy_name_addr_combined (rule 12) — landing in the review band there:
+    last_name/birth_date/ssn4 agreement (60/115 = 0.696) is real
+    corroborating evidence, but not enough on its own, given the address
+    comparison failed outright, to auto-accept."""
+    g = app_config.global_config
+    matchers = build_matchers(g.matching.matchers, g.standardization)
+
+    record = {
+        "first_name_std": "KATHERINE", "last_name_std": "NGUYEN",
+        "address1_std": "78 OAK AVE APT 2B", "zip5": "02909",
+        "birth_date": "1998-03-14", "ssn4": "4471",
+    }
+    candidates = [{
+        "idcol_id": "7734",
+        "first_name_std": "KATRINA", "last_name_std": "NGUYEN",
+        "address1_std": "99 MAPLE DR", "zip5": "02910",  # differs -> rule 10's exact zip5 also fails
+        "birth_date": "1998-03-14", "ssn4": "4471",
+    }]
+
+    for m in matchers:
+        out = m.match(record, candidates)
+        if out.decision in (MatchDecision.MATCHED, MatchDecision.AMBIGUOUS):
+            assert m.name == "fuzzy_name_addr_combined"
+            assert out.decision is MatchDecision.AMBIGUOUS
+            assert 0.6 <= out.score < 0.75
+            return
+    raise AssertionError("expected the fully-fuzzy tier to flag this record for review")

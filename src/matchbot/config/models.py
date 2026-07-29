@@ -71,6 +71,20 @@ class ProviderConfig(_Strict):
     format: FileFormat
     file_glob: str = Field(description="Glob to select this provider's files.")
 
+    # The S3 folder segment this file type's files land under, e.g.
+    # 'risos_voter'. Defaults to provider_id (true for every single-file-type
+    # provider so far — RIDE's folder is literally 'ride_enrollment', its
+    # provider_id). A multi_file provider's SECOND+ file type must set this
+    # explicitly to the shared folder, since its own provider_id
+    # (risos_voterhistory) is NOT the folder files actually land in
+    # (risos_voter) — see config_bridge.py's provider_folder_name().
+    s3_folder: str | None = Field(
+        default=None,
+        description="S3 folder this file type's files land under; "
+        "defaults to provider_id. Set explicitly when it differs (e.g. a "
+        "second file type sharing a multi_file provider's folder).",
+    )
+
     # Short agency/provider code and dataset name used in the DB (rilds_stage,
     # rilds_audit, land table name). Default to the provider_id halves so
     # existing providers need no change.
@@ -85,9 +99,46 @@ class ProviderConfig(_Strict):
         description="Dataset name, e.g. 'enrollment'. Defaults from provider_id.",
     )
 
-    # file column name -> canonical attribute name
+    # True when this provider ships more than one structurally distinct file
+    # under the same folder (e.g. RISOS sends voter registration AND voter
+    # history separately, with unrelated columns). False (default) keeps a
+    # provider's land table name exactly {provider_code}_land as before —
+    # true switches to one table per file type, {provider_code}_{file_type}_land,
+    # since a single shared table can't hold two incompatible file shapes
+    # (CREATE TABLE IF NOT EXISTS silently no-ops against an existing
+    # differently-shaped table, so the second file type's load then fails on
+    # missing columns).
+    multi_file: bool = Field(
+        default=False,
+        description="True if this provider sends multiple distinct file "
+        "shapes under one folder — land table becomes "
+        "{provider_code}_{file_type}_land instead of {provider_code}_land.",
+    )
+
+    # False for a file type that goes through land + transform but never
+    # person-linkage matching (e.g. RISOS VoterHistory: legacy's
+    # PeripheralDataRow — run_linkage=False — never runs First/Second Pass;
+    # it rides on the primary Voter file's already-established
+    # voter_id -> person_id linkage instead of re-matching itself). True
+    # (default) is every provider/file type built so far (RIDE, RISOS
+    # Voter) — both go through the full cleanse -> canonical -> match
+    # pipeline. run_pipeline.py routes a matches_dataset=False config
+    # through land + its own transform step and stops there, never touching
+    # RILDS_STAGE/matching at all.
+    matches_dataset: bool = Field(
+        default=True,
+        description="False if this file type only lands + transforms and "
+        "never goes through person-linkage matching (e.g. a peripheral/"
+        "history file tied to another file's identity resolution).",
+    )
+
+    # file column name -> canonical attribute name. Not required for a
+    # matches_dataset=False config that instead defines its own custom
+    # projection (e.g. VoterHistory's per-election unpivot has no 1:1
+    # column mapping to speak of).
     column_mappings: dict[str, str] = Field(
-        description="Maps raw file columns onto canonical attributes."
+        default_factory=dict,
+        description="Maps raw file columns onto canonical attributes.",
     )
     # Which rilds_reference column this provider's member_external_id (stored
     # generically as stage.rilds_id) should be compared against for the
@@ -153,6 +204,7 @@ class StandardizationConfig(_Strict):
     gender_map: dict[str, str] = Field(default_factory=dict)
     name_suffixes: list[str] = Field(default_factory=list)
     name_prefixes: list[str] = Field(default_factory=list)
+    address_abbreviations: dict[str, str] = Field(default_factory=dict)
 
 
 class BlockingKey(_Strict):

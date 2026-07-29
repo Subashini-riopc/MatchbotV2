@@ -96,6 +96,68 @@ def std_name_sql(raw_column: str, std_config: StandardizationConfig) -> str:
     return f"NULLIF({stripped}, '')"
 
 
+def std_address_sql(raw_column: str, std_config: StandardizationConfig) -> str:
+    """SQL expression standardizing ``raw_column`` per std_address()'s rules:
+    uppercase, collapse whitespace, then replace each whole token matching a
+    configured address_abbreviations key with its abbreviation (e.g.
+    "STREET" -> "ST"). Unmatched tokens pass through unchanged. NULL/empty
+    input -> NULL, matching std_name_sql's empty-result handling.
+
+    Token-by-token replacement (not a blanket string REPLACE) so a
+    substring match inside an unrelated word never gets corrupted — e.g.
+    replacing "EAST" -> "E" must not also rewrite "EASTON" or "NORTHEAST".
+    """
+    normalized = f"TRIM(REGEXP_REPLACE(UPPER({raw_column}), '\\\\s+', ' '))"
+    if not std_config.address_abbreviations:
+        return f"NULLIF({normalized}, '')"
+
+    abbrev_map = {k.upper(): v.upper() for k, v in std_config.address_abbreviations.items()}
+    case_branches = "\n            ".join(
+        f"WHEN t = '{k}' THEN '{v}'" for k, v in abbrev_map.items()
+    )
+    tokens_abbreviated = f"""
+        TRANSFORM(
+            SPLIT({normalized}, ' '),
+            t -> CASE
+                {case_branches}
+                ELSE t
+            END
+        )
+    """
+    joined = f"ARRAY_TO_STRING({tokens_abbreviated}, ' ')"
+    return f"NULLIF({joined}, '')"
+
+
+def std_zip_sql(raw_column: str) -> str:
+    """SQL expression mirroring std_zip(): strip to the first 5 digits,
+    dropping any ZIP+4 suffix. NULL if fewer than 5 digits remain."""
+    digits = f"REGEXP_REPLACE({raw_column}, '[^0-9]', '')"
+    first_five = f"LEFT({digits}, 5)"
+    return f"IFF(LENGTH({digits}) >= 5, {first_five}, NULL)"
+
+
+def ssn4_sql(raw_ssn_column: str) -> str:
+    """SQL expression mirroring ssn4(): strip non-digits, left-pad to 9,
+    take the last 4. NULL if the standardized SSN isn't exactly 9 digits
+    (matches std_ssn()'s malformed-SSN guard — a short/garbled SSN must not
+    produce a spurious last-4 value that could false-collide).
+
+    Checks LENGTH(digits) <= 9 explicitly before padding: Snowflake's LPAD
+    truncates from the left when the input is already longer than the
+    target length, so a 12-digit garbled SSN would otherwise silently come
+    out as 9 characters and pass the length check — Python's zfill never
+    truncates, so std_ssn() correctly rejects that case via its own
+    len(digits) == width comparison. Without this extra guard, the SQL
+    version would diverge from Python by accepting inputs Python rejects.
+    """
+    digits = f"REGEXP_REPLACE({raw_ssn_column}, '[^0-9]', '')"
+    padded = f"LPAD({digits}, 9, '0')"
+    return (
+        f"IFF({digits} IS NOT NULL AND LENGTH({digits}) BETWEEN 1 AND 9, "
+        f"RIGHT({padded}, 4), NULL)"
+    )
+
+
 def std_gender_sql(raw_column: str, std_config: StandardizationConfig) -> str:
     """SQL expression mirroring std_gender(): uppercase, look up in
     gender_map (case-insensitive), fall back to the uppercased raw value."""
