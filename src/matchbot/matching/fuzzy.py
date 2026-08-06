@@ -10,6 +10,17 @@ candidate is then routed:
 * otherwise                  -> UNMATCHED
 
 No human gate: AMBIGUOUS is a routing label, not a blocking pause.
+
+A comparison marked ``required: true`` (FieldComparison.required) is a hard
+precondition, independent of weight: a candidate that fails a required
+comparison is disqualified entirely, BEFORE scoring — it never becomes
+``best`` no matter how high its weighted score would otherwise be. This is
+deliberately separate from weight=0 (which still lets a candidate score and
+match via other fields; it just doesn't move the needle for that field) —
+added because weight=0 was previously being relied on to mean "not
+required," which it doesn't: e.g. a candidate in the wrong zip code/city
+could still match purely on address1_std text similarity when zip5 carried
+weight=0. See matchers/fuzzy.py (Snowflake SQL) for the equivalent guard.
 """
 
 from __future__ import annotations
@@ -61,6 +72,19 @@ class FuzzyMatcher:
         self._std = std_config
         self._total_weight = sum(c.weight for c in self.comparisons) or 1.0
 
+    def _passes_required(self, record: Mapping[str, Any], cand: Mapping[str, Any]) -> bool:
+        """True only if every required=true comparison clears its own
+        threshold — checked BEFORE scoring, so a candidate that fails a
+        required field is disqualified outright, never scored via its
+        other (possibly high-weight) fields."""
+        for c in self.comparisons:
+            if not c.required:
+                continue
+            sim = _similarity(c.method, record.get(c.attribute), cand.get(c.attribute))
+            if sim < c.threshold:
+                return False
+        return True
+
     def _score(self, record: Mapping[str, Any], cand: Mapping[str, Any]) -> float:
         agreeing = 0.0
         for c in self.comparisons:
@@ -77,6 +101,8 @@ class FuzzyMatcher:
         best_score = 0.0
         best: Mapping[str, Any] | None = None
         for cand in candidates:
+            if not self._passes_required(record, cand):
+                continue
             s = self._score(record, cand)
             if s > best_score:
                 best_score, best = s, cand

@@ -20,8 +20,8 @@ matcher based on its configured comparisons:
 
 1. Exact-anchored (the common case — any matcher with at least one
    `exact`/threshold=1.0 comparison, e.g. fuzzy_name_exact_addr's
-   address1_std+zip5, or fuzzy_name_addr_combined's zip5/birth_date/ssn4):
-   the FIRST such comparison's normalized equality becomes the actual SQL
+   address1_std+zip5, or fuzzy_exact_name_addr's first_name_std+
+   last_name_std): the FIRST such comparison's normalized equality becomes the actual SQL
    JOIN condition (cheap, selective, same shape as a deterministic
    matcher's join) — see _find_exact_anchor(). The score is then computed
    over ALL configured comparisons (including the anchor field, which
@@ -37,7 +37,7 @@ matcher based on its configured comparisons:
    narrows candidates to "plausibly the same last name" before scoring the
    full weighted comparison set, rather than a true unrestricted cross
    join. Kept as a fallback for any future all-fuzzy matcher, not exercised
-   by today's three fuzzy rules.
+   by today's two fuzzy rules.
 
 Both strategies are approximations of "the true candidate set a
 from-scratch blocking implementation would produce" — see
@@ -45,6 +45,19 @@ docs/snowflake-implementation-plan.md's blocking note (this demo's
 deterministic matchers already accept implicit equi-join blocking in lieu
 of a separate blocking-index step; the same tradeoff applies here, just
 with a phonetic filter instead of an exact one for the no-anchor case).
+
+required comparisons (FieldComparison.required): a hard precondition,
+independent of weight — see matching/fuzzy.py's module docstring for the
+full rationale (weight=0 does NOT mean "not required"; it just means the
+field doesn't move the score, but a candidate can still match via other
+fields even if a weight=0 field disagrees entirely). Every required
+comparison (not just whichever one _find_exact_anchor() happens to pick
+as the join anchor) is folded into join_predicate_sql as an extra AND
+condition — a required field the anchor detector didn't already select is
+appended as its own equality/similarity-threshold check, so a candidate
+failing ANY required field is excluded at the JOIN itself, never reaching
+scoring at all. This mirrors matching/fuzzy.py's _passes_required() check
+exactly, just enforced via SQL instead of a Python loop.
 """
 
 from __future__ import annotations
@@ -133,6 +146,15 @@ def _find_exact_anchor(comparisons: list["FieldComparison"]) -> "FieldComparison
     return None
 
 
+def _required_condition_sql(comparison: "FieldComparison") -> str:
+    """A single required comparison's hard-gate condition, suitable for
+    AND-ing into join_predicate_sql — mirrors matching/fuzzy.py's
+    _passes_required(): the field's similarity must clear its own
+    threshold, treating a missing value on either side as failing (never
+    NULL-propagating into a silently-true condition)."""
+    return f"{_similarity_sql(comparison)} >= {comparison.threshold}"
+
+
 @register_sql_matcher("fuzzy")
 def build_fuzzy_fragment(spec: "MatcherSpec", external_id_column: str) -> _BuiltFragment:
     """Return a _BuiltFragment for one fuzzy MatcherSpec.
@@ -148,7 +170,7 @@ def build_fuzzy_fragment(spec: "MatcherSpec", external_id_column: str) -> _Built
         # A fuzzy matcher with no comparisons can never score above 0 —
         # same "never matches" case as a keyless deterministic matcher.
         return _BuiltFragment(
-            "1 = 0", "1 = 0", "FUZZY",
+            "1 = 0", "1 = 0", spec.name,
             score_sql="0.0",
             accept_threshold=spec.accept_threshold,
             review_threshold=spec.review_threshold,
@@ -174,10 +196,19 @@ def build_fuzzy_fragment(spec: "MatcherSpec", external_id_column: str) -> _Built
             f"TRIM({_col('s', _BLOCKING_FALLBACK_KEY)}::VARCHAR) != ''"
         )
 
+    # Fold every required=true comparison into the join as an extra AND
+    # condition — except the one already selected as the anchor (its
+    # equality is already the join_predicate; AND-ing it again would be a
+    # redundant no-op, not a bug, but noise). See this module's docstring
+    # for why this must be a real join condition, not just weight=0.
+    for c in spec.comparisons:
+        if c.required and c is not anchor:
+            join_predicate = f"{join_predicate} AND {_required_condition_sql(c)}"
+
     return _BuiltFragment(
         join_predicate,
         guard_predicate,
-        "FUZZY",
+        spec.name,
         score_sql=_score_sql(spec.comparisons),
         accept_threshold=spec.accept_threshold,
         review_threshold=spec.review_threshold,

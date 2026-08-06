@@ -118,113 +118,108 @@ matching:
       type: deterministic
       keys: [first_name_std, last_name_std, birth_date]
 
-    # --- Address tiers, strict -> loose. Each requires both names exact;
-    # only the address-field combination varies. Ordered so a record is
-    # always matched at the strictest address tier its data supports —
-    # dropping city/state before zip (city/state are the noisier,
-    # formatting-prone fields; zip is the cleaner anchor). Deliberately no
-    # last_name+address-only tier (household collision risk: spouses/family
-    # commonly share both last name and address) and no zip-only tier (too
-    # loose for an exact match — see docs/snowflake-implementation-plan.md
-    # matching-logic discussion).
-    - name: deterministic_name_addr_full
-      type: deterministic
-      keys: [first_name_std, last_name_std, address1_std, city, state, zip5]
-
+    # --- Address tiers (rules 5-6). Both require both names exact; only
+    # the address-field combination varies. Deliberately no zip-only tier
+    # (too loose for an exact match — see
+    # docs/snowflake-implementation-plan.md matching-logic discussion).
+    # Rules 7-8 (deterministic_lastname_addr_state_zip,
+    # deterministic_firstname_addr_state_zip — each dropping one of the two
+    # name fields) were removed per explicit request: both carried real
+    # household-collision risk (people sharing a last name + address, or a
+    # first name + address, could false-match) with only state+zip as a
+    # narrowing anchor.
     - name: deterministic_name_addr_city_state
       type: deterministic
       keys: [first_name_std, last_name_std, address1_std, city, state]
 
-    - name: deterministic_name_addr_street_zip
+    # No city/state — anchored by address1+zip instead of address1+city+
+    # state. A record only reaches this if rule 5's city/state comparison
+    # didn't line up but name+address1+zip did.
+    - name: deterministic_name_addr_zip
       type: deterministic
       keys: [first_name_std, last_name_std, address1_std, zip5]
-
-    - name: deterministic_name_addr
-      type: deterministic
-      keys: [first_name_std, last_name_std, address1_std]
-
-    # Last-resort exact tier: first name + address only (no last name). Only
-    # ever reached by records with no last-name/address geographic anchor
-    # available at all — every stricter tier above already requires last
-    # name, so this only fires when those have nothing to work with.
-    - name: deterministic_fn_addr
-      type: deterministic
-      keys: [first_name_std, address1_std, state, zip5]
 
     # --- Fuzzy tier. Only reached if every exact rule above fails. Each
     # scores similarity in [0,1]; score >= accept_threshold matches,
     # review_threshold <= score < accept_threshold is flagged for manual
     # review (routed to rilds_error with decision=LOW_CONFIDENCE), below
-    # review_threshold is no match. Ordered from safest (one side held
-    # exact) to least safe (nothing held exact).
-    - name: fuzzy_name_exact_addr
-      type: fuzzy
-      accept_threshold: 0.8
-      review_threshold: 0.6
-      comparisons:
-        - attribute: first_name_std
-          method: jaro_winkler
-          weight: 45
-          threshold: 0.80
-        - attribute: last_name_std
-          method: jaro_winkler
-          weight: 55
-          threshold: 0.80
-        - attribute: address1_std
-          method: exact
-          weight: 100
-          threshold: 1.0
-        - attribute: zip5
-          method: exact
-          weight: 100
-          threshold: 1.0
-
+    # review_threshold is no match. fuzzy_name_addr_combined (nothing held
+    # fully exact — six weak/partial signals corroborating each other) was
+    # removed per explicit request; a record that would only have cleared
+    # that loosest tier now ends up UNMATCHED instead of matched/reviewed.
+    # Order below (exact-name-anchored first, exact-address-anchored
+    # second) is per explicit request — not a strictness ranking.
+    #
+    # Score is purely address1_std (weight 100, threshold 0.90) —
+    # first_name_std/last_name_std/zip5 carry weight 0 (not scored) but
+    # are all marked required: true, a REAL hard precondition enforced
+    # identically on both platforms (see FieldComparison.required's
+    # docstring in config/models.py). Added after a live bug: with only
+    # weight=0 (no required flag), a candidate in the wrong zip code/city/
+    # state could still match purely on address1_std TEXT similarity —
+    # e.g. two different "78 Oak Ave"s in different towns. required
+    # closes that for real: first_name_std/last_name_std/zip5 must all
+    # match exactly or this rule never fires for that candidate,
+    # regardless of how similar the address text looks.
     - name: fuzzy_exact_name_addr
       type: fuzzy
-      accept_threshold: 0.8
-      review_threshold: 0.6
+      accept_threshold: 0.85
+      review_threshold: 0.65
       comparisons:
         - attribute: first_name_std
           method: exact
-          weight: 50
+          weight: 0
           threshold: 1.0
+          required: true
         - attribute: last_name_std
           method: exact
-          weight: 50
+          weight: 0
           threshold: 1.0
+          required: true
+        - attribute: zip5
+          method: exact
+          weight: 0
+          threshold: 1.0
+          required: true
         - attribute: address1_std
           method: jaro_winkler
           weight: 100
-          threshold: 0.80
+          threshold: 0.90
 
-    - name: fuzzy_name_addr_combined
+    # Score is purely first_name_std+last_name_std (50/50, threshold 0.90
+    # each) — address1_std/zip5 stay in comparisons ONLY as the exact-match
+    # SQL join anchor (weight 0, so they contribute nothing to the score).
+    # Previously address1_std+zip5 alone (200 of 300 total weight) could
+    # push a candidate to/past accept_threshold even with a totally
+    # different first name (e.g. last_name(55)+address(100)+zip(100)=255
+    # = 0.85, meeting the old accept_threshold with 0 contribution from
+    # first_name) — a real false-match risk caught by inspecting live
+    # matched records. Removing address1_std/zip5 from comparisons
+    # entirely was considered and rejected: matchers/fuzzy.py's
+    # _find_exact_anchor() scans this same comparisons list for the join
+    # anchor, so removing them would silently fall back to a much looser
+    # phonetic-only (last_name_metaphone1) join instead of the exact
+    # address+zip anchor this rule is named for.
+    - name: fuzzy_name_exact_addr
       type: fuzzy
-      accept_threshold: 0.75
-      review_threshold: 0.6
+      accept_threshold: 0.90
+      review_threshold: 0.75
       comparisons:
         - attribute: first_name_std
           method: jaro_winkler
-          weight: 20
-          threshold: 0.80
+          weight: 50
+          threshold: 0.90
         - attribute: last_name_std
           method: jaro_winkler
-          weight: 25
-          threshold: 0.80
+          weight: 50
+          threshold: 0.90
         - attribute: address1_std
-          method: jaro_winkler
-          weight: 20
-          threshold: 0.80
+          method: exact
+          weight: 0
+          threshold: 1.0
         - attribute: zip5
           method: exact
-          weight: 15
-          threshold: 1.0
-        - attribute: birth_date
-          method: exact
-          weight: 15
-          threshold: 1.0
-        - attribute: ssn4
-          method: exact
-          weight: 20
+          weight: 0
           threshold: 1.0
 
 # --- Data-quality rules (evaluated during cleanse; recorded as metrics) ------

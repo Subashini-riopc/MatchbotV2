@@ -206,3 +206,143 @@ def birth_parts_sql(birth_date_column: str) -> dict[str, str]:
         "birth_month": f"MONTH({birth_date_column})",
         "birth_day": f"DAY({birth_date_column})",
     }
+
+
+# ---------------------------------------------------------------------------
+# Deterministic-matcher hash keys.
+#
+# THE SINGLE SOURCE OF TRUTH for how a multi-column deterministic matcher's
+# hash column is computed — RILDS_STAGE computes it via
+# deterministic_hash_sql() below (called from provider_sql.py), and
+# whichever separate process populates/refreshes RILDS_REFERENCE MUST
+# compute its own hash columns using this exact same formula, or a
+# genuinely matching pair of records will hash to different values and
+# silently never match (see snowflake/ddl/05_reference_table.sql's
+# comment on the hash columns for the formula written out for that
+# process to follow). There is no legacy Python predecessor to mirror
+# here — this hashing scheme is new to this pipeline.
+#
+# Formula, precisely, for a matcher with keys [k1, k2, ...] (order is the
+# matcher's key order in config/global.yaml — never reorder independently
+# on either side):
+#   1. Normalize each key exactly as matchers/deterministic.py's _norm_sql
+#      does at comparison time: TRIM(UPPER(col::VARCHAR)) for string-typed
+#      keys, the raw value (cast to VARCHAR for concatenation) for
+#      date/numeric-typed keys (birth_date, birth_year, birth_month,
+#      birth_day — see _NON_STRING_HASH_KEYS). This mirrors the join's own
+#      normalization exactly, so the hash can never disagree with what a
+#      direct column-by-column join would have compared, regardless of
+#      whether the stored column happens to already be clean (e.g.
+#      city/state are stored upper/trimmed already per most providers'
+#      transforms, but this formula does not rely on that assumption —
+#      every key is defensively re-normalized here, same as the join does
+#      today).
+#   2. If ANY key's normalized value is NULL or blank (matching
+#      _blank_check_sql's guard), the WHOLE hash is NULL — never hash a
+#      partially-missing key. Two rows both missing the same field must
+#      never collide into a false hash match (e.g. two people both missing
+#      an address must not hash to the same address-based hash value).
+#   3. Concatenate the normalized values with a literal '|' delimiter
+#      (chosen because none of these fields can naturally contain a pipe
+#      character post-normalization) and hash with SHA2(..., 256).
+_NON_STRING_HASH_KEYS = frozenset({"birth_date", "birth_year", "birth_month", "birth_day"})
+
+
+def _hash_norm_sql(column_ref: str, key: str) -> str:
+    """Mirror matchers/deterministic.py's _norm_sql exactly — see this
+    section's module-level comment for why the hash must use the identical
+    normalization the join itself uses."""
+    if key in _NON_STRING_HASH_KEYS:
+        return f"{column_ref}::VARCHAR"
+    return f"TRIM(UPPER({column_ref}::VARCHAR))"
+
+
+def _hash_blank_check_sql(column_ref: str, key: str) -> str:
+    """Mirror matchers/deterministic.py's _blank_check_sql exactly."""
+    if key in _NON_STRING_HASH_KEYS:
+        return f"{column_ref} IS NOT NULL"
+    return f"({column_ref} IS NOT NULL AND TRIM({column_ref}::VARCHAR) != '')"
+
+
+def deterministic_hash_sql(keys: list[str], column_refs: dict[str, str]) -> str:
+    """SQL expression for one matcher's hash column, e.g. name_dob_hash.
+
+    ``keys`` is the matcher's key list in config/global.yaml order (order
+    matters — see module comment). ``column_refs`` maps each canonical key
+    name to the actual column reference to read it from (e.g.
+    {"first_name_std": "first_name_std", "birth_date": "birth_date"} when
+    called from provider_sql.py's final SELECT, where those columns are
+    already in scope under their own names) — a plain dict rather than
+    always assuming ``key`` doubles as the column name, since a caller
+    computing this against a table with differently-named/aliased columns
+    needs to supply the real reference.
+
+    Only meant for matchers with 2+ keys — see config/global.yaml's
+    deterministic_external_id/deterministic_ssn, which stay plain
+    single-column comparisons in matchers/deterministic.py (hashing a
+    single column collapses nothing; there is no join-cost benefit, and
+    deterministic_external_id specifically compares against a
+    provider-varying reference column that can't be hashed once — see
+    matchers/deterministic.py's external_id_column handling).
+    """
+    guard = " AND ".join(_hash_blank_check_sql(column_refs[k], k) for k in keys)
+    normalized_concat = " || '|' || ".join(_hash_norm_sql(column_refs[k], k) for k in keys)
+    return f"IFF({guard}, SHA2({normalized_concat}, 256), NULL)"
+
+
+# ---------------------------------------------------------------------------
+# Fixed key-set -> hash-column-name registry.
+#
+# Explicit rather than derived from a matcher's NAME (e.g. deriving
+# "name_dob_hash" from the string "deterministic_name_dob") — keyed on the
+# matcher's KEYS tuple instead, so provider_sql.py (which computes hash
+# columns on RILDS_STAGE, keyed by what canonical attributes are actually
+# available) and matchers/deterministic.py (which emits the join predicate
+# for a MatcherSpec, keyed by config/global.yaml's declared keys) are
+# guaranteed to agree on the same column name for the same key-set without
+# either one needing to parse or trust the other's matcher NAME string.
+#
+# Covers the 4 current deterministic matchers with 2+ keys (see
+# config/global.yaml) — deterministic_external_id and deterministic_ssn
+# (1 key each) are intentionally absent; see deterministic_hash_sql's
+# docstring for why those two stay plain column comparisons.
+#
+# deterministic_fn_addr (first_name_std, address1_std, state, zip5 — no
+# last name) was removed as too loose a last-resort tier, reintroduced as
+# deterministic_firstname_addr_state_zip, then removed again (along with
+# deterministic_lastname_addr_state_zip) per explicit request — both
+# carried real household-collision risk (people sharing a last name +
+# address, or a first name + address, could false-match) with only
+# state+zip as a narrowing anchor. deterministic_name_addr_full and
+# deterministic_name_addr (and their hash columns name_addr_full_hash/
+# name_addr_hash) were dropped earlier for the same reason. Rule 6 was
+# then changed from deterministic_name_state_zip (first_name_std,
+# last_name_std, state, zip5 — name_state_zip_hash) to
+# deterministic_name_addr_zip (first_name_std, last_name_std,
+# address1_std, zip5 — name_addr_zip_hash), swapping state for
+# address1_std, per explicit request — not part of the current rule set
+# (rules 1-6: external_id, ssn, name_ssn4, name_dob, name_addr_city_state,
+# name_addr_zip).
+#
+# Adding another multi-key deterministic matcher later: add its key tuple
+# (order matters — must match that matcher's `keys:` list in
+# config/global.yaml exactly) and a new hash column name here, add the
+# matching computed column to provider_sql.py's projection and to both
+# RILDS_STAGE and RILDS_REFERENCE's DDL — four places, all listed together
+# so nothing is easy to half-do.
+HASH_COLUMN_BY_KEYS: dict[tuple[str, ...], str] = {
+    ("first_name_std", "last_name_std", "ssn4"): "name_ssn4_hash",
+    ("first_name_std", "last_name_std", "birth_date"): "name_dob_hash",
+    ("first_name_std", "last_name_std", "address1_std", "city", "state"): "name_addr_city_state_hash",
+    ("first_name_std", "last_name_std", "address1_std", "zip5"): "name_addr_zip_hash",
+}
+
+
+def hash_column_for_keys(keys: list[str]) -> str | None:
+    """The precomputed hash column name for this exact key tuple, or None
+    if this key-set has no registered hash column (e.g. a single-key
+    matcher, or a multi-key combination not yet added to
+    HASH_COLUMN_BY_KEYS) — callers must fall back to plain column-by-column
+    comparison in that case, not assume a hash column exists.
+    """
+    return HASH_COLUMN_BY_KEYS.get(tuple(keys))

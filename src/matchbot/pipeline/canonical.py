@@ -42,6 +42,29 @@ class CanonicalStage:
                 missing=missing_raw,
             )
 
+        # combined_columns (see CombinedColumnSpec) — computed on the RAW
+        # frame, before rename, since it reads raw column names directly.
+        # Concatenates with the configured separator; a row missing any one
+        # of its source columns still produces the columns it does have
+        # (Polars pl.concat_str's ignore_nulls treats a missing/null piece
+        # as empty rather than nulling the whole result) — same tolerant
+        # spirit as this stage's existing missing-column handling above.
+        combined_exprs = []
+        for canon_attr, spec in ctx.provider.combined_columns.items():
+            available = [c for c in spec.from_columns if c in present]
+            if not available:
+                continue
+            combined_exprs.append(
+                pl.concat_str(
+                    [pl.col(c) for c in available],
+                    separator=spec.separator,
+                    ignore_nulls=True,
+                )
+                .alias(canon_attr)
+            )
+        if combined_exprs:
+            frame = frame.with_columns(combined_exprs)
+
         df = frame.rename(rename)
 
         # Keep only canonical attributes + provenance.

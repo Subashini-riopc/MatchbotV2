@@ -29,6 +29,7 @@ Invoke manually (build step 5's validation):
 from __future__ import annotations
 
 import fnmatch
+import json
 import time
 import uuid
 from typing import TYPE_CHECKING
@@ -134,6 +135,7 @@ def run_match_pipeline(session: "Session", file_path: str) -> str:
     """
     from matchbot_snowflake.cascade_builder import build_cascade_sql, build_writeback_sql
     from matchbot_snowflake.config_models import load_bundled_config
+    from matchbot_snowflake.derive_sql import HASH_COLUMN_BY_KEYS
     from matchbot_snowflake.land_sql import (
         csv_format_for_delimiter,
         fetch_header_columns,
@@ -148,7 +150,6 @@ def run_match_pipeline(session: "Session", file_path: str) -> str:
     )
     from matchbot_snowflake.matcher_registry import build_sql_fragments
     from matchbot_snowflake.notify_sql import (
-        matched_on_attributes,
         render_failure_email_sql,
         render_success_email_sql,
     )
@@ -175,7 +176,7 @@ def run_match_pipeline(session: "Session", file_path: str) -> str:
     candidate_rows = (
         session.sql(
             "SELECT provider_id, provider_code, dataset_name, external_id_column, delimiter, "
-            "file_glob, multi_file, matches_dataset "
+            "file_glob, multi_file, matches_dataset, matching_identifiers "
             "FROM PROVIDER_FOLDER_MAP WHERE folder_name = ?",
             params=[folder],
         )
@@ -191,10 +192,11 @@ def run_match_pipeline(session: "Session", file_path: str) -> str:
         )
     (
         provider_id, provider_code, dataset_name, external_id_column, delimiter,
-        _file_glob, multi_file, matches_dataset,
+        _file_glob, multi_file, matches_dataset, matching_identifiers,
     ) = (
         provider_row[0], provider_row[1], provider_row[2], provider_row[3],
         provider_row[4], provider_row[5], provider_row[6], provider_row[7],
+        provider_row[8],
     )
     csv_format = csv_format_for_delimiter(delimiter)
 
@@ -391,6 +393,13 @@ def run_match_pipeline(session: "Session", file_path: str) -> str:
             land_table=land_table,
             pipeline_run_id=pipeline_run_id,
         )
+        # Hash columns (name_dob_hash, etc.) are appended after zip5 — see
+        # derive_sql.py's HASH_COLUMN_BY_KEYS, the single source of truth
+        # for their names, imported rather than hardcoded here so this list
+        # can never silently drift from what provider_sql.py actually
+        # computes.
+        hash_column_names = list(HASH_COLUMN_BY_KEYS.values())
+        hash_columns_list = ", ".join(hash_column_names)
         stage_insert_sql = f"""
             INSERT INTO RILDS_STAGE (
                 pipeline_run_id, provider_code, dataset_name, source_row_id,
@@ -398,14 +407,14 @@ def run_match_pipeline(session: "Session", file_path: str) -> str:
                 first_name_std, last_name_std, first_name_metaphone1,
                 last_name_metaphone1, last_name8, birth_year, birth_month,
                 birth_day, rilds_id, lasid, ssn, ssn4, address1, address1_std,
-                address2, city, state, zip, zip5
+                address2, city, state, zip, zip5, {hash_columns_list}
             )
             SELECT {pipeline_run_id}, provider_code, dataset_name, source_row_id,
                 first_name, middle_name, last_name, birth_date, gender,
                 first_name_std, last_name_std, first_name_metaphone1,
                 last_name_metaphone1, last_name8, birth_year, birth_month,
                 birth_day, rilds_id, lasid, ssn, ssn4, address1, address1_std,
-                address2, city, state, zip, zip5
+                address2, city, state, zip, zip5, {hash_columns_list}
             FROM ({projection_sql})
         """
         session.sql(stage_insert_sql).collect()
@@ -483,7 +492,20 @@ def run_match_pipeline(session: "Session", file_path: str) -> str:
             reference_row_count = session.sql(
                 "SELECT COUNT(*) FROM RILDS_REFERENCE"
             ).collect()[0][0]
-            matched_on = matched_on_attributes(app_config.global_config.matching.matchers)
+            # PROVIDER_FOLDER_MAP.matching_identifiers (config_bridge.py) is
+            # this provider's own resolved-chain "matched on" list — already
+            # filtered down to only the matchers this provider's
+            # column_mappings actually support (config_bridge.py's
+            # matching_identifiers_for_provider(), same two-step computation
+            # as the AWS orchestrator's filter_chain_by_provider_attributes +
+            # matched_on_attributes). Reading it here instead of recomputing
+            # from the full, UNFILTERED global chain fixes a real gap: this
+            # email used to list every matcher's attributes regardless of
+            # whether this provider's data could ever satisfy them (e.g.
+            # showing SSN/Birth Date/Address for RIDE, which maps none of
+            # those) — confirmed live before this fix. Snowpark returns an
+            # ARRAY column as a JSON string via collect(), not a Python list.
+            matched_on = json.loads(matching_identifiers) if matching_identifiers else []
             duplicate_row_count = session.sql(
                 render_duplicate_row_count_sql(
                     provider_code, pipeline_run_id, header_columns, file_type=file_type

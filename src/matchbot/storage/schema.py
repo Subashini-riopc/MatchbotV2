@@ -90,11 +90,11 @@ def _identity_columns() -> list[Column[Any]]:
         Column("lasid", String(50)),
         Column("ssn", String(11)),
         # Last 4 digits of ssn, derived (matching/derive.py::add_derived_columns) —
-        # backs the deterministic_name_ssn4 and fuzzy_name_addr_combined matchers.
+        # backs the deterministic_name_ssn4 matcher.
         Column("ssn4", String(4)),
         Column("address1", String(200)),
         # Standardized address1, derived — backs the name+address matcher
-        # tiers (deterministic_name_addr_full through deterministic_fn_addr).
+        # tiers (deterministic_name_addr_full through deterministic_name_addr).
         Column("address1_std", String(200)),
         Column("address2", String(200)),
         Column("city", String(100)),
@@ -102,6 +102,28 @@ def _identity_columns() -> list[Column[Any]]:
         Column("zip", String(20)),
         # zip truncated to 5 digits, derived — same matcher tiers as address1_std.
         Column("zip5", String(5)),
+    ]
+
+
+def _hash_columns() -> list[Column[Any]]:
+    """Precomputed deterministic-matcher hash keys — rilds_stage and
+    rilds_reference ONLY, deliberately NOT part of _identity_columns()
+    (so rilds_matched/rilds_error, which also use that helper, never get
+    these columns — a 64-char hash has no display value on a
+    human-facing matched/error report, mirroring the Snowflake side's
+    RILDS_MATCHED/RILDS_ERROR, which likewise carry no hash columns; see
+    snowflake/ddl/04_land_and_stage_tables.sql / 05_reference_table.sql).
+
+    See matching/derive.py's HASH_KEY_SETS for the exact key-set each
+    column backs and the formula that computes it (also documented, for
+    whoever populates rilds_reference, in this same contract as
+    address1_std/zip5 below — see that column's own comment).
+    """
+    return [
+        Column("name_ssn4_hash", String(64)),
+        Column("name_dob_hash", String(64)),
+        Column("name_addr_city_state_hash", String(64)),
+        Column("name_addr_zip_hash", String(64)),
     ]
 
 
@@ -171,6 +193,7 @@ def build_metadata(schema: str) -> MetaData:
         Column("dataset_name", String(100), nullable=False),
         Column("source_row_id", Integer, nullable=False),  # FK -> <provider>_land.id
         *_identity_columns(),
+        *_hash_columns(),
         # match output (filled by the matcher). idcol_id references
         # rilds_reference.idcol_id (not member_universe.id — renamed when
         # rilds_reference became the matching source).
@@ -192,7 +215,13 @@ def build_metadata(schema: str) -> MetaData:
         Column("stage_id", Integer, nullable=False, index=True),  # FK -> rilds_stage.id
         Column("idcol_id", Integer, nullable=False, index=True),  # FK -> rilds_reference.idcol_id
         Column("match_score", Numeric(5, 4), nullable=False),
-        Column("match_method", String(20), nullable=False),  # EXACT_SASID / LEVENSHTEIN / ...
+        # The matcher's own config/global.yaml name verbatim (e.g.
+        # 'deterministic_name_dob', 'fuzzy_exact_name_addr'), not a
+        # coarse EXACT/EXACT_SASID/LEVENSHTEIN bucket — see
+        # matching/vocab.py's method_to_db(). String(50) since the longest
+        # current matcher name is 34 chars
+        # (deterministic_name_addr_city_state).
+        Column("match_method", String(50), nullable=False),
         *_identity_columns(),  # incoming record's matching attributes
         Column("matched_at", DateTime(timezone=True), server_default=func.now()),
         Column("matched_by", String(100), server_default="system"),
@@ -312,6 +341,19 @@ def build_metadata(schema: str) -> MetaData:
         Column("state", String(20)),
         Column("zip", String(20)),
         Column("zip5", String(5)),  # zip truncated to 5 digits; same contract as address1_std
+
+        # Precomputed deterministic-matcher hash keys — see _hash_columns()'s
+        # docstring for the full rationale. CONTRACT for whoever
+        # populates/refreshes rilds_reference (a separate process, out of
+        # scope here): each hash MUST be computed with the EXACT formula in
+        # matching/derive.py's HASH_KEY_SETS/_row_hash (equivalently,
+        # snowflake/ddl/05_reference_table.sql's column comments document
+        # the same formula for the Snowflake side) — this is not "assumed
+        # precomputed the same way" as a loose convention like
+        # address1_std/zip5 above; a hash is only useful at all if both
+        # sides compute it identically, since the whole point is a single
+        # equality check replacing a multi-column comparison.
+        *_hash_columns(),
     )
 
     return md

@@ -230,7 +230,14 @@ class Orchestrator:
         # skip on every single record — filtering them out once here avoids
         # that wasted work and keeps matched_on accurate to what can actually
         # match, not the full theoretical chain regardless of relevance.
-        mapped_attributes = set(ctx.provider.column_mappings.values())
+        # combined_columns targets (e.g. RISOS's address1, built from
+        # STREET_NUMBER + STREET_NAME — see CanonicalStage) count as mapped
+        # too: a provider building a canonical attribute via combine rather
+        # than a plain 1:1 column_mappings entry still genuinely has that
+        # attribute available for matching.
+        mapped_attributes = set(ctx.provider.column_mappings.values()) | set(
+            ctx.provider.combined_columns.keys()
+        )
         chosen = filter_chain_by_provider_attributes(chosen, mapped_attributes)
         matchers = build_matchers(chosen, g.standardization)
         metrics.matched_on = matched_on_attributes(chosen)

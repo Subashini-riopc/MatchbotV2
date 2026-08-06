@@ -53,6 +53,30 @@ class TransformSpec(_Strict):
 
 
 # ---------------------------------------------------------------------------
+# Combined columns (multiple raw source columns -> one canonical attribute)
+# ---------------------------------------------------------------------------
+class CombinedColumnSpec(_Strict):
+    """Concatenate several raw source columns into one canonical attribute.
+
+    column_mappings is strictly 1 raw column -> 1 canonical attribute; some
+    providers ship an address (or other field) pre-split across multiple raw
+    columns instead (e.g. RISOS's STREET_NUMBER/STREET_NAME, where address1
+    must be the full street address for every address-anchored matcher to
+    mean anything — a bare house number is a near-useless identity anchor,
+    since many unrelated people share one). This is the generic mechanism
+    for that: any provider can declare "concatenate these N raw columns, in
+    this order, with this separator" for any canonical attribute, not just
+    address1 — no per-provider code required.
+    """
+
+    from_columns: list[str] = Field(
+        min_length=1,
+        description="Raw source column names, concatenated in this order.",
+    )
+    separator: str = Field(default=" ", description="Inserted between each column's value.")
+
+
+# ---------------------------------------------------------------------------
 # Provider config (one file per provider)
 # ---------------------------------------------------------------------------
 class FixedWidthColumn(_Strict):
@@ -139,6 +163,16 @@ class ProviderConfig(_Strict):
     column_mappings: dict[str, str] = Field(
         default_factory=dict,
         description="Maps raw file columns onto canonical attributes.",
+    )
+    # Canonical attribute -> how to build it from MULTIPLE raw columns (see
+    # CombinedColumnSpec). Only for a canonical attribute that a provider's
+    # file splits across more than one raw column — column_mappings remains
+    # the only mechanism for every ordinary 1:1 raw->canonical mapping.
+    combined_columns: dict[str, CombinedColumnSpec] = Field(
+        default_factory=dict,
+        description="Canonical attribute -> raw columns to concatenate "
+        "into it, for a provider whose file splits one canonical field "
+        "across multiple raw columns (e.g. street number + street name).",
     )
     # Which rilds_reference column this provider's member_external_id (stored
     # generically as stage.rilds_id) should be compared against for the
@@ -233,6 +267,24 @@ class FieldComparison(_Strict):
         ge=0.0,
         le=1.0,
         description="Per-field similarity (0-1) at/above which the field agrees.",
+    )
+    # A required comparison must clear its own threshold or the WHOLE
+    # matcher returns no-match for that candidate immediately — enforced
+    # BEFORE scoring, identically on both platforms (unlike weight, which
+    # only affects the score and is NOT a real requirement on its own: a
+    # weight=0 comparison still contributes to the score, just with zero
+    # effect, but a candidate that fails it is scored anyway and can still
+    # match via other fields). Added specifically because weight=0 was
+    # being used to mean "not required" when in fact it silently permitted
+    # exactly that — e.g. a candidate in the wrong zip code/city/state
+    # still matching purely on address1_std text similarity. required
+    # closes that gap for real, on both matching/fuzzy.py (Python) and
+    # matchers/fuzzy.py (Snowflake SQL).
+    required: bool = Field(
+        default=False,
+        description="If true, this comparison must clear its threshold or "
+        "the matcher never fires for this candidate, regardless of the "
+        "overall weighted score.",
     )
 
 

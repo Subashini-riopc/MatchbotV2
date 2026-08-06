@@ -66,6 +66,32 @@ CREATE TABLE IF NOT EXISTS RILDS_STAGE (
     zip                    VARCHAR(20),
     zip5                   VARCHAR(5),                -- zip truncated to 5 digits, derived (see derive_sql.std_zip_sql)
 
+    -- Precomputed hash columns for the deterministic matchers with 2+ keys
+    -- (see config/global.yaml's matcher chain) — collapse a multi-column
+    -- exact-equality join (e.g. name_dob's 3-column AND) into a single
+    -- VARCHAR(64) SHA2-256 hex digest comparison. NULL whenever any input
+    -- key is missing/blank (never hash a partially-missing key — see
+    -- derive_sql.py's deterministic_hash_sql, THE single source of truth
+    -- for the exact formula). RILDS_REFERENCE must compute these same 4
+    -- columns identically (see that table's DDL) or matching rows will
+    -- hash differently and silently never match via these matchers.
+    -- (fn_addr_hash — first_name_std, address1_std, state, zip5 — was
+    -- removed along with deterministic_fn_addr, dropped as too loose a
+    -- last-resort tier; reintroduced as firstname_addr_state_zip_hash,
+    -- then dropped again along with lastname_addr_state_zip_hash — see
+    -- the DROP COLUMN migration further below; neither is part of the
+    -- current 6-rule chain. name_addr_full_hash/name_addr_street_zip_hash/
+    -- name_addr_hash were dropped for the same household-collision
+    -- reasoning even earlier. name_state_zip_hash (rule 6: first_name_std,
+    -- last_name_std, state, zip5) was renamed to name_addr_zip_hash when
+    -- rule 6 changed to first_name_std, last_name_std, address1_std,
+    -- zip5 (state swapped for address1_std) — see the RENAME COLUMN
+    -- migration further below.)
+    name_ssn4_hash            VARCHAR(64),             -- keys: first_name_std, last_name_std, ssn4
+    name_dob_hash             VARCHAR(64),             -- keys: first_name_std, last_name_std, birth_date
+    name_addr_city_state_hash VARCHAR(64),             -- keys: first_name_std, last_name_std, address1_std, city, state
+    name_addr_zip_hash             VARCHAR(64),        -- keys: first_name_std, last_name_std, address1_std, zip5
+
     -- match-output columns
     idcol_id               NUMBER,                    -- FK -> RILDS_REFERENCE.idcol_id, NULL until matched
     match_score            NUMBER(5, 4),
@@ -90,6 +116,50 @@ ALTER TABLE RILDS_STAGE CLUSTER BY (last_name8, birth_date);
 ALTER TABLE RILDS_STAGE ADD COLUMN IF NOT EXISTS ssn4 VARCHAR(4);
 ALTER TABLE RILDS_STAGE ADD COLUMN IF NOT EXISTS address1_std VARCHAR(200);
 ALTER TABLE RILDS_STAGE ADD COLUMN IF NOT EXISTS zip5 VARCHAR(5);
+
+-- Hash columns (see the column-level comments above) added after initial
+-- deployment — same reasoning as ssn4/address1_std/zip5 above.
+ALTER TABLE RILDS_STAGE ADD COLUMN IF NOT EXISTS name_ssn4_hash VARCHAR(64);
+ALTER TABLE RILDS_STAGE ADD COLUMN IF NOT EXISTS name_dob_hash VARCHAR(64);
+ALTER TABLE RILDS_STAGE ADD COLUMN IF NOT EXISTS name_addr_city_state_hash VARCHAR(64);
+
+-- deterministic_fn_addr (first_name + address only, no last name) was
+-- removed from config/global.yaml as too loose a last-resort tier — its
+-- backing column is dropped rather than left as unused dead weight.
+ALTER TABLE RILDS_STAGE DROP COLUMN IF EXISTS fn_addr_hash;
+
+-- name_state_zip tier added per explicit request — same reasoning as the
+-- ssn4/hash columns above. (Column later renamed to name_addr_zip_hash;
+-- see the RENAME COLUMN migration below.)
+ALTER TABLE RILDS_STAGE ADD COLUMN IF NOT EXISTS name_state_zip_hash VARCHAR(64);
+
+-- deterministic_name_addr_full, deterministic_name_addr_street_zip, and
+-- deterministic_name_addr were dropped from config/global.yaml — not
+-- part of the current 6-rule chain. Their backing hash columns are
+-- dropped rather than left as unused dead weight.
+ALTER TABLE RILDS_STAGE DROP COLUMN IF EXISTS name_addr_full_hash;
+ALTER TABLE RILDS_STAGE DROP COLUMN IF EXISTS name_addr_street_zip_hash;
+ALTER TABLE RILDS_STAGE DROP COLUMN IF EXISTS name_addr_hash;
+
+-- Rule 6 (deterministic_name_state_zip: first_name_std, last_name_std,
+-- state, zip5) was changed to deterministic_name_addr_zip (first_name_std,
+-- last_name_std, address1_std, zip5 — state swapped for address1_std) per
+-- explicit request. RENAME (not drop+add): preserves any already-
+-- populated RILDS_REFERENCE values under the new name rather than losing
+-- them — though note the VALUES THEMSELVES are now stale (computed from
+-- the old key set) until the reference-population process recomputes
+-- them with the new formula; this migration only renames the column.
+ALTER TABLE RILDS_STAGE RENAME COLUMN name_state_zip_hash TO name_addr_zip_hash;
+
+-- deterministic_lastname_addr_state_zip and
+-- deterministic_firstname_addr_state_zip (each dropping one of the two
+-- name fields, anchored only by state+zip) were removed from
+-- config/global.yaml per explicit request — both carried real
+-- household-collision risk (people sharing a last name + address, or a
+-- first name + address, could false-match). Their backing hash columns
+-- are dropped rather than left as unused dead weight.
+ALTER TABLE RILDS_STAGE DROP COLUMN IF EXISTS lastname_addr_state_zip_hash;
+ALTER TABLE RILDS_STAGE DROP COLUMN IF EXISTS firstname_addr_state_zip_hash;
 
 -- RISOS_VOTERHISTORY_STAGE — NOT a <PROVIDER>_STAGE generalization of
 -- RILDS_STAGE, and deliberately not shared with it. VoterHistory

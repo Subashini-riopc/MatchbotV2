@@ -92,18 +92,114 @@ CREATE TABLE IF NOT EXISTS RILDS_REFERENCE (
     city                     VARCHAR(100),
     state                    VARCHAR(20),
     zip                      VARCHAR(20),
-    zip5                      VARCHAR(5)                -- zip truncated to 5 digits; same contract as
+    zip5                      VARCHAR(5),               -- zip truncated to 5 digits; same contract as
                                                           -- address1_std above
+
+    -- Precomputed hash columns for the deterministic matchers with 2+ keys
+    -- (config/global.yaml's matcher chain) — RILDS_STAGE computes these
+    -- same 4 columns per row via provider_sql.py/derive_sql.py's
+    -- deterministic_hash_sql(); matchers/deterministic.py then joins on
+    -- s.<hash_col> = r.<hash_col> instead of a multi-column AND chain.
+    --
+    -- CONTRACT for whoever populates/refreshes this table (a separate
+    -- process, out of scope here): each hash MUST be computed with the
+    -- EXACT formula below, or a genuinely matching pair of records will
+    -- hash to different values and silently never match via these
+    -- matchers. This is not "assumed precomputed the same way" as a
+    -- convention (like address1_std/zip5's contract below) — it is a
+    -- hard requirement, since a hash is only useful if both sides compute
+    -- it identically.
+    --
+    -- Formula (see derive_sql.py's deterministic_hash_sql/HASH_COLUMN_BY_KEYS
+    -- for the canonical Snowflake SQL implementation of this exact logic):
+    --   For a hash's key list [k1, k2, ...] (order matters, see below):
+    --   1. Normalize each key: for a string-typed key, TRIM(UPPER(value));
+    --      for birth_date specifically, use the raw DATE value cast to
+    --      text (no case/trim transform applies to a date).
+    --   2. If ANY key's normalized value is NULL or empty/blank, the
+    --      resulting hash is NULL (never hash a partially-missing key —
+    --      two rows both missing the same field must not collide into a
+    --      false match).
+    --   3. Concatenate the normalized values with a literal '|' delimiter
+    --      and hash with SHA2(concatenated_string, 256) (i.e. the
+    --      64-character hex SHA-256 digest).
+    --   Column -> exact key list, in order (do not reorder):
+    --     name_ssn4_hash:            [first_name_std, last_name_std, ssn4]
+    --     name_dob_hash:             [first_name_std, last_name_std, birth_date]
+    --     name_addr_city_state_hash: [first_name_std, last_name_std, address1_std, city, state]
+    --     name_addr_zip_hash:             [first_name_std, last_name_std, address1_std, zip5]
+    -- Example (name_dob_hash): SHA2(TRIM(UPPER(first_name_std)) || '|' ||
+    --   TRIM(UPPER(last_name_std)) || '|' || birth_date::VARCHAR, 256)
+    --
+    -- (fn_addr_hash — first_name_std, address1_std, state, zip5 — was
+    -- removed along with deterministic_fn_addr, dropped as too loose a
+    -- last-resort tier; reintroduced as firstname_addr_state_zip_hash,
+    -- then dropped again along with lastname_addr_state_zip_hash per
+    -- explicit request — see the DROP COLUMN migration below.
+    -- name_addr_full_hash/name_addr_street_zip_hash/name_addr_hash were
+    -- dropped earlier for the same household-collision reasoning — see
+    -- the DROP COLUMN migration further below. name_state_zip_hash (rule
+    -- 6: first_name_std, last_name_std, state, zip5) was renamed to
+    -- name_addr_zip_hash when rule 6 changed to first_name_std,
+    -- last_name_std, address1_std, zip5 — see the RENAME COLUMN
+    -- migration further below.)
+    name_ssn4_hash            VARCHAR(64),
+    name_dob_hash             VARCHAR(64),
+    name_addr_city_state_hash VARCHAR(64),
+    name_addr_zip_hash             VARCHAR(64)
 );
 
 -- ADD COLUMN IF NOT EXISTS for already-deployed accounts (CREATE TABLE IF
 -- NOT EXISTS above is a no-op against an existing RILDS_REFERENCE). Adding
 -- these columns does not populate them for existing rows — address1_std/
--- zip5 are assumed precomputed upstream (same one-time-export contract as
--- first_name_std/last_name_std); existing rows read NULL here until
--- whatever process populates this table provides them.
+-- zip5/the hash columns are assumed precomputed upstream (same one-time-
+-- export contract as first_name_std/last_name_std, and for the hash
+-- columns specifically, the exact formula documented above); existing
+-- rows read NULL here until whatever process populates this table
+-- provides them.
 ALTER TABLE RILDS_REFERENCE ADD COLUMN IF NOT EXISTS address1_std VARCHAR(200);
 ALTER TABLE RILDS_REFERENCE ADD COLUMN IF NOT EXISTS zip5 VARCHAR(5);
+ALTER TABLE RILDS_REFERENCE ADD COLUMN IF NOT EXISTS name_ssn4_hash VARCHAR(64);
+ALTER TABLE RILDS_REFERENCE ADD COLUMN IF NOT EXISTS name_dob_hash VARCHAR(64);
+ALTER TABLE RILDS_REFERENCE ADD COLUMN IF NOT EXISTS name_addr_city_state_hash VARCHAR(64);
+
+-- deterministic_fn_addr (first_name + address only, no last name) was
+-- removed from config/global.yaml as too loose a last-resort tier — its
+-- backing column is dropped rather than left as unused dead weight.
+ALTER TABLE RILDS_REFERENCE DROP COLUMN IF EXISTS fn_addr_hash;
+
+-- name_state_zip tier added per explicit request — same reasoning as the
+-- hash columns above; existing rows read NULL here until the
+-- reference-population process backfills them. (Column later renamed to
+-- name_addr_zip_hash; see the RENAME COLUMN migration below.)
+ALTER TABLE RILDS_REFERENCE ADD COLUMN IF NOT EXISTS name_state_zip_hash VARCHAR(64);
+
+-- deterministic_name_addr_full, deterministic_name_addr_street_zip, and
+-- deterministic_name_addr were dropped from config/global.yaml — not
+-- part of the current 6-rule chain. Their backing hash columns are
+-- dropped rather than left as unused dead weight.
+ALTER TABLE RILDS_REFERENCE DROP COLUMN IF EXISTS name_addr_full_hash;
+ALTER TABLE RILDS_REFERENCE DROP COLUMN IF EXISTS name_addr_street_zip_hash;
+ALTER TABLE RILDS_REFERENCE DROP COLUMN IF EXISTS name_addr_hash;
+
+-- Rule 6 (deterministic_name_state_zip: first_name_std, last_name_std,
+-- state, zip5) was changed to deterministic_name_addr_zip (first_name_std,
+-- last_name_std, address1_std, zip5 — state swapped for address1_std)
+-- per explicit request. RENAME (not drop+add): preserves any
+-- already-populated values under the new name — though note the VALUES
+-- THEMSELVES are now stale (computed from the old key set) until the
+-- reference-population process recomputes them with the new formula;
+-- this migration only renames the column.
+ALTER TABLE RILDS_REFERENCE RENAME COLUMN name_state_zip_hash TO name_addr_zip_hash;
+
+-- deterministic_lastname_addr_state_zip and
+-- deterministic_firstname_addr_state_zip (each dropping one of the two
+-- name fields, anchored only by state+zip) were removed from
+-- config/global.yaml per explicit request — both carried real
+-- household-collision risk. Their backing hash columns are dropped
+-- rather than left as unused dead weight.
+ALTER TABLE RILDS_REFERENCE DROP COLUMN IF EXISTS lastname_addr_state_zip_hash;
+ALTER TABLE RILDS_REFERENCE DROP COLUMN IF EXISTS firstname_addr_state_zip_hash;
 
 -- Clustering keys mirroring the Postgres composite blocking indexes.
 ALTER TABLE RILDS_REFERENCE CLUSTER BY (last_name8, birth_date);

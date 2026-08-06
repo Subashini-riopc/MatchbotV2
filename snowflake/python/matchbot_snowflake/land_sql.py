@@ -110,13 +110,18 @@ def csv_format_for_delimiter(delimiter: str) -> str:
         ) from None
 
 
-# Matches ONE trailing date/period/sequence segment on a file stem, e.g.
-# "_032026", "_2026-07-09", "-2026-07-09", "_20260709". Applied repeatedly
-# (not just once) since a stem can have more than one such segment
-# (ride_enrollment_2026-07-09 has a single hyphenated date segment here,
-# but a future file could plausibly have "_v2_2026-07-09" etc.) — see
-# file_type_from_filename's loop.
-_TRAILING_DATE_OR_NUMBER_RE = re.compile(r"[_-][0-9]{2,}([_-][0-9]{2,})*$")
+# Matches trailing date/period/sequence/sample-size segments on a file
+# stem, e.g. "_032026", "_2026-07-09", "-2026-07-09", "_20260709", "_100k",
+# "_10k", "_1k". Each segment must start with a digit, so a genuine
+# alphabetic file-type word is never eaten (e.g. "risos_voter" stays
+# intact — "voter" doesn't start with a digit). The trailing [A-Za-z]*
+# specifically covers sample/subset-size suffixes like "100k" — missing
+# originally, which meant Voter_032026_100k.txt / _10k.txt / _1k.txt (this
+# session's generated test-sample files) each produced their OWN land
+# table (RISOS_VOTER_032026_100K_LAND etc.) instead of collapsing into the
+# shared RISOS_VOTER_LAND like the full Voter_032026.txt correctly does —
+# caught live via three stray land tables that shouldn't have existed.
+_TRAILING_DATE_OR_NUMBER_RE = re.compile(r"[_-][0-9]+[A-Za-z]*([_-][0-9]+[A-Za-z]*)*$")
 
 
 def file_type_from_filename(filename: str) -> str:

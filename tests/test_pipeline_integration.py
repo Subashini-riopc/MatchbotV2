@@ -77,8 +77,11 @@ def test_full_pipeline_routes_and_audits(
     assert len(ride_repo.target) == 2
     assert len(ride_repo.error) == 1
     assert {r["idcol_id"] for r in ride_repo.target} == {1, 2}
+    # match_method is the matcher's own config/global.yaml name verbatim
+    # (see matching/vocab.py's method_to_db), not a coarse EXACT_SASID
+    # bucket.
     assert all(
-        r["match_method"] == "EXACT_SASID" for r in ride_repo.target
+        r["match_method"] == "deterministic_external_id" for r in ride_repo.target
     )
     assert ride_repo.error[0]["decision"] == "NO_MATCH"
 

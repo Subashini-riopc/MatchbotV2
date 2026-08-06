@@ -18,7 +18,9 @@ from __future__ import annotations
 from matchbot_snowflake.config_models import ProviderConfig, StandardizationConfig, TransformSpec
 
 from matchbot_snowflake.derive_sql import (
+    HASH_COLUMN_BY_KEYS,
     birth_parts_sql,
+    deterministic_hash_sql,
     last_name8_sql,
     metaphone_sql,
     ssn4_sql,
@@ -102,8 +104,38 @@ def render_provider_projection_sql(
         for raw_col, canonical in provider.column_mappings.items()
     }
 
+    # combined_columns (see CombinedColumnSpec, config_models.py):
+    # concatenates 2+ raw columns into one canonical attribute — e.g. RISOS's
+    # STREET_NUMBER + STREET_NAME into address1, since a bare house number
+    # is a near-useless identity anchor on its own (every address-anchored
+    # matcher keys on address1_std expecting a full street address). NULL-
+    # safe: CONCAT would return NULL if ANY argument is NULL, so each raw
+    # ref is COALESCE'd to '' first, mirroring canonical.py's Polars
+    # ignore_nulls=True (a row missing one piece still gets the pieces it
+    # has, not a fully-NULL combined value).
+    combined_sql: dict[str, str] = {
+        canonical_attr: (
+            f" || '{spec.separator}' || "
+        ).join(f"COALESCE(land.{raw_col}, '')" for raw_col in spec.from_columns)
+        for canonical_attr, spec in provider.combined_columns.items()
+    }
+
     def canonical_sql(canonical_attr: str) -> str:
+        # combined_columns and column_mappings are mutually exclusive per
+        # canonical attribute (loader.py's cross-reference validation
+        # forbids declaring both for the same attribute), so at most one of
+        # these is set — a combined expression is just parenthesized and
+        # treated exactly like any other raw column reference from here on,
+        # so it still goes through this provider's normal transforms entry
+        # (e.g. RISOS's address1: {upper: true, trim: true}) rather than
+        # bypassing it. Caught as a real bug before this fix: an earlier
+        # version special-cased combined_ref straight to
+        # _default_trim_sql(), silently skipping the configured upper/trim
+        # transform for any combined attribute.
         raw_ref = raw_by_canonical.get(canonical_attr)
+        combined_ref = combined_sql.get(canonical_attr)
+        if combined_ref is not None:
+            raw_ref = f"({combined_ref})"
         if raw_ref is None:
             # A bare, untyped NULL compiles fine as a VARCHAR-ish column
             # value, but birth_date is DATE-typed downstream (RILDS_STAGE's
@@ -189,6 +221,31 @@ def render_provider_projection_sql(
             )
     skip_filter = "\n    WHERE " + " AND ".join(where_conditions)
 
+    # Hash columns for the deterministic matchers that compare 2+ keys —
+    # see derive_sql.py's HASH_COLUMN_BY_KEYS module comment for why the
+    # key-set -> column-name mapping is centralized there rather than
+    # hardcoded independently here and in matchers/deterministic.py. Column
+    # refs point at "standardized" (the CTE below, not "derived") since
+    # every hash input (ssn4, address1_std, city, state, zip5) only exists
+    # as a real column from that point on — ssn4/address1_std/zip5 are
+    # computed IN "standardized" itself, not available any earlier.
+    standardized_column_refs = {
+        "first_name_std": "first_name_std",
+        "last_name_std": "last_name_std",
+        "birth_date": "birth_date",
+        "ssn4": "ssn4",
+        "address1_std": "address1_std",
+        "city": "city",
+        "state": "state",
+        "zip5": "zip5",
+    }
+    hash_columns_sql = ",\n        ".join(
+        f"{deterministic_hash_sql(list(keys), standardized_column_refs)} AS {hash_col}"
+        for keys, hash_col in HASH_COLUMN_BY_KEYS.items()
+    )
+    hash_column_names = list(HASH_COLUMN_BY_KEYS.values())
+    hash_columns_select = ",\n    ".join(hash_column_names)
+
     return f"""WITH canonical AS (
     SELECT
         land.id AS source_row_id,
@@ -201,6 +258,37 @@ derived AS (
     SELECT
         {derived_select}
     FROM canonical
+),
+standardized AS (
+    SELECT
+        source_row_id,
+        provider_code,
+        dataset_name,
+        first_name,
+        middle_name,
+        last_name,
+        birth_date,
+        gender,
+        first_name_std,
+        last_name_std,
+        {metaphone_sql('first_name_std')} AS first_name_metaphone1,
+        {metaphone_sql('last_name_std')} AS last_name_metaphone1,
+        {last_name8_sql('last_name_std')} AS last_name8,
+        {birth_parts['birth_year']} AS birth_year,
+        {birth_parts['birth_month']} AS birth_month,
+        {birth_parts['birth_day']} AS birth_day,
+        rilds_id,
+        lasid,
+        ssn,
+        {ssn4_sql('ssn')} AS ssn4,
+        address1,
+        {std_address_sql('address1', std_config)} AS address1_std,
+        address2,
+        city,
+        state,
+        zip,
+        {std_zip_sql('zip')} AS zip5
+    FROM derived
 )
 SELECT
     source_row_id,
@@ -213,21 +301,22 @@ SELECT
     gender,
     first_name_std,
     last_name_std,
-    {metaphone_sql('first_name_std')} AS first_name_metaphone1,
-    {metaphone_sql('last_name_std')} AS last_name_metaphone1,
-    {last_name8_sql('last_name_std')} AS last_name8,
-    {birth_parts['birth_year']} AS birth_year,
-    {birth_parts['birth_month']} AS birth_month,
-    {birth_parts['birth_day']} AS birth_day,
+    first_name_metaphone1,
+    last_name_metaphone1,
+    last_name8,
+    birth_year,
+    birth_month,
+    birth_day,
     rilds_id,
     lasid,
     ssn,
-    {ssn4_sql('ssn')} AS ssn4,
+    ssn4,
     address1,
-    {std_address_sql('address1', std_config)} AS address1_std,
+    address1_std,
     address2,
     city,
     state,
     zip,
-    {std_zip_sql('zip')} AS zip5
-FROM derived"""
+    zip5,
+    {hash_columns_sql}
+FROM standardized"""

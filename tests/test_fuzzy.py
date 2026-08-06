@@ -83,3 +83,90 @@ def test_no_candidates() -> None:
     m = FuzzyMatcher(SPEC, STD)
     out = m.match({"first_name": "X"}, [])
     assert out.decision is MatchDecision.UNMATCHED
+
+
+# --- required=true: a hard precondition, independent of weight -------------
+# See FieldComparison.required's docstring (config/models.py) for the full
+# rationale: weight=0 alone does NOT gate a candidate out, it just means the
+# field doesn't move the score — a candidate can still match via other
+# fields. required=true actually disqualifies a candidate outright, before
+# scoring, regardless of weight.
+
+REQUIRED_SPEC = MatcherSpec(
+    name="fuzzy_required_test",
+    type="fuzzy",
+    accept_threshold=0.80,
+    review_threshold=0.50,
+    comparisons=[
+        FieldComparison(
+            attribute="zip", method="exact", weight=0.0, threshold=1.0, required=True
+        ),
+        FieldComparison(attribute="address", method="jaro_winkler", weight=1.0, threshold=0.90),
+    ],
+)
+
+
+def test_required_field_that_fails_disqualifies_the_candidate_even_with_a_perfect_score() -> None:
+    """zip disagrees (required=true, weight=0) — even though address is a
+    byte-identical match (would score 1.0 on weight alone), the candidate
+    must never be selected at all."""
+    m = FuzzyMatcher(REQUIRED_SPEC, STD)
+    rec = {"zip": "02909", "address": "78 OAK AVE"}
+    cands = [{"idcol_id": "1", "zip": "02116", "address": "78 OAK AVE"}]
+    out = m.match(rec, cands)
+    assert out.decision is MatchDecision.UNMATCHED
+
+
+def test_required_field_that_passes_allows_normal_scoring() -> None:
+    """zip agrees — required=true is satisfied, so scoring proceeds
+    normally on the remaining (weighted) fields."""
+    m = FuzzyMatcher(REQUIRED_SPEC, STD)
+    rec = {"zip": "02909", "address": "78 OAK AVE"}
+    cands = [{"idcol_id": "1", "zip": "02909", "address": "78 OAK AVE"}]
+    out = m.match(rec, cands)
+    assert out.decision is MatchDecision.MATCHED
+    assert out.score == 1.0
+
+
+def test_required_field_missing_on_either_side_disqualifies() -> None:
+    """A required field missing entirely (None) must fail the gate — never
+    silently treated as satisfied."""
+    m = FuzzyMatcher(REQUIRED_SPEC, STD)
+    rec = {"zip": None, "address": "78 OAK AVE"}
+    cands = [{"idcol_id": "1", "zip": "02909", "address": "78 OAK AVE"}]
+    out = m.match(rec, cands)
+    assert out.decision is MatchDecision.UNMATCHED
+
+
+def test_multiple_required_fields_must_all_pass() -> None:
+    """Two required fields — a candidate failing EITHER one is
+    disqualified, not just the first one checked."""
+    spec = MatcherSpec(
+        name="fuzzy_multi_required_test",
+        type="fuzzy",
+        accept_threshold=0.80,
+        review_threshold=0.50,
+        comparisons=[
+            FieldComparison(
+                attribute="first_name", method="exact", weight=0.0, threshold=1.0, required=True
+            ),
+            FieldComparison(
+                attribute="zip", method="exact", weight=0.0, threshold=1.0, required=True
+            ),
+            FieldComparison(attribute="address", method="jaro_winkler", weight=1.0, threshold=0.90),
+        ],
+    )
+    m = FuzzyMatcher(spec, STD)
+    rec = {"first_name": "KATHERINE", "zip": "02909", "address": "78 OAK AVE"}
+
+    # first_name fails, zip passes -> still disqualified.
+    out = m.match(rec, [{"idcol_id": "1", "first_name": "KATRINA", "zip": "02909", "address": "78 OAK AVE"}])
+    assert out.decision is MatchDecision.UNMATCHED
+
+    # first_name passes, zip fails -> still disqualified.
+    out = m.match(rec, [{"idcol_id": "2", "first_name": "KATHERINE", "zip": "02116", "address": "78 OAK AVE"}])
+    assert out.decision is MatchDecision.UNMATCHED
+
+    # Both pass -> scores normally.
+    out = m.match(rec, [{"idcol_id": "3", "first_name": "KATHERINE", "zip": "02909", "address": "78 OAK AVE"}])
+    assert out.decision is MatchDecision.MATCHED

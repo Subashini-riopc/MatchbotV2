@@ -76,6 +76,19 @@ _DERIVED_ATTRIBUTE_SOURCE: dict[str, str] = {
     "birth_year": "birth_date",
     "birth_month": "birth_date",
     "birth_day": "birth_date",
+    # address1_std/zip5/ssn4 were missing here — a real bug: every
+    # address-anchored or ssn4-anchored deterministic rule
+    # (deterministic_name_addr_city_state, deterministic_name_addr_zip,
+    # deterministic_name_ssn4) was silently dropped from every provider's
+    # resolved chain (and therefore its "Matched on" email line), even for
+    # a provider like RISOS that genuinely maps address1/zip/ssn — because
+    # this map had no entry translating the derived key back to the raw
+    # canonical attribute the provider's column_mappings actually declares.
+    # Caught via a live RISOS email showing only External ID/First Name/
+    # Last Name/Birth Date despite RISOS mapping address1/city/state/zip.
+    "address1_std": "address1",
+    "zip5": "zip",
+    "ssn4": "ssn",
     # Generic stage/reference comparison key for a provider's strong id —
     # populated from canonical member_external_id regardless of which agency
     # issued it (see cleanse.py / ProviderConfig.external_id_column).
@@ -128,7 +141,14 @@ _ATTRIBUTE_DISPLAY_NAMES: dict[str, str] = {
     "last_name_std": "Last Name",
     "birth_date": "Birth Date",
     "ssn": "SSN",
+    "ssn4": "SSN",
     "gender": "Gender",
+    "address1": "Address",
+    "address1_std": "Address",
+    "city": "City",
+    "state": "State",
+    "zip": "Zip",
+    "zip5": "Zip",
 }
 
 

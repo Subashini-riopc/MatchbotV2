@@ -110,11 +110,26 @@ class FixedWidthColumn(_Strict):
     length: int = Field(ge=1)
 
 
+class CombinedColumnSpec(_Strict):
+    """Concatenate several raw source columns into one canonical attribute —
+    see the real matchbot.config.models.CombinedColumnSpec's docstring for
+    the full rationale (config_models.py is a deliberate, hand-synced copy
+    of that real package; see this module's own docstring)."""
+
+    from_columns: list[str] = Field(min_length=1)
+    separator: str = " "
+
+
 class FieldComparison(_Strict):
     attribute: str
     method: str = "exact"
     weight: float = Field(default=1.0, ge=0.0)
     threshold: float = Field(default=1.0, ge=0.0, le=1.0)
+    # See the real matchbot.config.models.FieldComparison.required's
+    # docstring for the full rationale — a required comparison must clear
+    # its threshold or the matcher never fires for that candidate,
+    # enforced BEFORE scoring, independent of weight.
+    required: bool = False
 
 
 class MatcherSpec(_Strict):
@@ -152,6 +167,7 @@ class ProviderConfig(_Strict):
     # cleanse -> canonical -> match pipeline.
     matches_dataset: bool = True
     column_mappings: dict[str, str] = Field(default_factory=dict)
+    combined_columns: dict[str, CombinedColumnSpec] = Field(default_factory=dict)
     external_id_column: str | None = None
     transforms: dict[str, TransformSpec] = Field(default_factory=dict)
     skip_if_null: list[str] = Field(default_factory=list)
@@ -341,6 +357,22 @@ def _validate_cross_references(app: AppConfig) -> None:
             if attr not in CANONICAL_NAMES:
                 errors.append(
                     f"provider {pid!r}: column {col!r} maps to unknown attribute {attr!r}"
+                )
+        for attr, spec in prov.combined_columns.items():
+            if attr not in CANONICAL_NAMES:
+                errors.append(
+                    f"provider {pid!r}: combined_columns target {attr!r} is not a "
+                    "canonical attribute"
+                )
+            if attr in prov.column_mappings.values():
+                errors.append(
+                    f"provider {pid!r}: {attr!r} is declared in both column_mappings "
+                    "and combined_columns — ambiguous which one wins"
+                )
+            if len(spec.from_columns) < 2:
+                errors.append(
+                    f"provider {pid!r}: combined_columns {attr!r} needs 2+ from_columns "
+                    "(a single column belongs in column_mappings instead)"
                 )
         for attr in prov.transforms:
             if attr not in CANONICAL_NAMES:

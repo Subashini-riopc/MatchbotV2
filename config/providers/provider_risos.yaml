@@ -53,8 +53,6 @@ column_mappings:              # raw file column      -> canonical attribute
   VOTER_ID:    member_external_id
   GENDER:      gender
   DATE_OF_BIRTH: birth_date
-  STREET_NUMBER: address1
-  STREET_NAME:   address2
   CITY:        city
   STATE:       state
   ZIP_CODE:    zip
@@ -64,6 +62,22 @@ column_mappings:              # raw file column      -> canonical attribute
   # dropped at the canonical stage (provenance: source_row_id is still
   # preserved per row). Revisit MAILING_* if RISOS's residential address
   # turns out to be less reliable than its mailing address for matching.
+  # address2 is deliberately left unmapped — RISOS has no genuine second
+  # address line; STREET_NAME (formerly parked here as a workaround) now
+  # moves into the combined address1 below.
+
+# RISOS ships street number and street name as two separate raw columns —
+# every address-anchored matcher (deterministic_name_addr_city_state,
+# deterministic_name_addr_zip, and the fuzzy address comparisons) keys on
+# address1_std expecting a FULL street address, not a bare house number.
+# Mapping STREET_NUMBER alone to address1 (the original config) made
+# every address comparison compare house numbers only — a near-useless
+# identity anchor, since many unrelated people/records share one. See
+# CombinedColumnSpec (config_models.py) for the generic mechanism.
+combined_columns:
+  address1:
+    from_columns: [STREET_NUMBER, STREET_NAME]
+    separator: " "
 
 transforms:
   first_name:          { type: string, upper: true }
@@ -80,7 +94,6 @@ transforms:
   gender:              { type: string, upper: true }
   birth_date:          { type: date, format: "%m/%d/%Y" }
   address1:            { type: string, upper: true, trim: true }
-  address2:            { type: string, upper: true, trim: true }
   city:                { type: string, upper: true, trim: true }
   state:               { type: string, upper: true, trim: true }
   zip:                 { type: string, trim: true, zero_pad: 5 }

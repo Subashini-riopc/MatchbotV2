@@ -7,10 +7,9 @@ fuzzy/Levenshtein, nearest-neighbor) means writing one new generator module
 and registering it here — zero change to cascade_builder.py or anything
 that calls build_sql_fragments().
 
-Only "deterministic" is implemented for this demo (see matchers/
-deterministic.py) — the 4 matchers in config/global.yaml's chain today
-(deterministic_external_id, deterministic_ssn, deterministic_name_dob,
-deterministic_name_addr) are all this one type.
+"deterministic" and "fuzzy" are both implemented (see matchers/
+deterministic.py and matchers/fuzzy.py) — see config/global.yaml's chain
+for the current matchers of each type.
 """
 
 from __future__ import annotations
@@ -50,8 +49,11 @@ class MatcherSqlFragment:
         short-circuit, evaluated once per staged row rather than
         implicitly through the join.
     method_label:
-        The value written to rilds_matched.match_method / vocab.py's
-        method_to_db() output for this matcher (e.g. 'EXACT_SASID', 'EXACT').
+        The value written to rilds_matched.match_method — the matcher's own
+        config/global.yaml name verbatim (e.g. 'deterministic_name_dob',
+        'fuzzy_exact_name_addr'), not a coarse EXACT/EXACT_SASID/FUZZY
+        bucket, so it's possible to tell which specific rule matched a
+        given row without a separate lookup.
     score_sql:
         A SQL expression (evaluated per stage/candidate row pair, alias
         ``s``/``r`` in scope) producing this pair's match score in [0, 1].

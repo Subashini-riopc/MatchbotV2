@@ -1,6 +1,8 @@
 """SYSTEM$SEND_EMAIL call generation for RUN_MATCH_PIPELINE's run-summary
 notification — the Snowflake-native equivalent of the AWS demo's
-matchbot.notify.ses.SESNotifier.
+matchbot.notify.ses.SESNotifier. Sent as an HTML table body (mime_type
+'text/html'), matching the layout SESNotifier already builds on the AWS
+side (see notify/ses.py's _build_html), rather than a flat text dump.
 
 Requires a one-time account-level notification integration and per-recipient
 email verification, done once outside this code (not managed here, same as
@@ -33,6 +35,23 @@ NOTIFICATION_INTEGRATION = "MATCHBOT_EMAIL_INT"
 # comma-separated list, not per-run configurable) — see notify/ses.py.
 RECIPIENTS = "subashini@adroitts.com,nikhil@adroitts.com"
 
+_TD = 'style="padding:6px 12px;border:1px solid #ddd;"'
+_TD_LABEL = 'style="padding:6px 12px;border:1px solid #ddd;font-weight:bold;"'
+_TH = 'style="padding:6px 12px;border:1px solid #ddd;background:#f2f2f2;text-align:left;"'
+
+
+def _html_escape(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _row_html(label: str, value: str) -> str:
+    return f"<tr><td {_TD_LABEL}>{_html_escape(label)}</td><td {_TD}>{_html_escape(value)}</td></tr>"
+
 # Ported verbatim from matchbot.pipeline.match::_ATTRIBUTE_DISPLAY_NAMES so
 # matched_on_attributes() below produces identical labels to the AWS email's
 # "Matched on" row for the same matcher chain — kept here rather than
@@ -49,7 +68,14 @@ _ATTRIBUTE_DISPLAY_NAMES: dict[str, str] = {
     "last_name_std": "Last Name",
     "birth_date": "Birth Date",
     "ssn": "SSN",
+    "ssn4": "SSN",
     "gender": "Gender",
+    "address1": "Address",
+    "address1_std": "Address",
+    "city": "City",
+    "state": "State",
+    "zip": "Zip",
+    "zip5": "Zip",
 }
 
 
@@ -82,6 +108,38 @@ def _escape(value: str) -> str:
     return value.replace("'", "''")
 
 
+def _file_profile_html(
+    total_columns: int,
+    duplicate_row_count: int,
+    rows_landed: int,
+    null_counts: list[tuple[str, int]],
+) -> str:
+    """One row per source column's null/blank count, plus the summary
+    counts above it — HTML equivalent of the AWS email's file-profile
+    table (see notify/ses.py's _file_profile_html), built from the same
+    inputs the old plain-text version used."""
+    if not null_counts:
+        return ""
+    header = "<tr>" + "".join(f"<th {_TH}>{h}</th>" for h in ("Column", "Null / Blank Count", "Null / Blank %")) + "</tr>"
+    body_rows = []
+    for col, count in null_counts:
+        pct = (count / rows_landed) if rows_landed else 0.0
+        body_rows.append(
+            f"<tr><td {_TD}>{_html_escape(col)}</td><td {_TD}>{count}</td><td {_TD}>{pct:.1%}</td></tr>"
+        )
+    return f"""\
+    <h3 style="margin-bottom:4px;">File profile — as received</h3>
+    <table style="border-collapse:collapse;margin-bottom:8px;">
+      {_row_html("Total rows", str(rows_landed))}
+      {_row_html("Total columns", str(total_columns))}
+      {_row_html("Duplicate rows", str(duplicate_row_count))}
+    </table>
+    <table style="border-collapse:collapse;margin-bottom:16px;">
+      {header}
+      {"".join(body_rows)}
+    </table>"""
+
+
 def render_success_email_sql(
     file_path: str,
     provider_code: str,
@@ -99,48 +157,47 @@ def render_success_email_sql(
     duplicate_row_count: int,
     null_counts: list[tuple[str, int]],
 ) -> str:
-    """CALL SYSTEM$SEND_EMAIL(...) for a successful run.
+    """CALL SYSTEM$SEND_EMAIL(...) for a successful run, HTML body.
 
     null_counts is a list of (column_name, null_count) pairs, in the same
-    order as the file's own header — the Snowflake-side equivalent of the
-    AWS email's per-column "File profile" table.
+    order as the file's own header — feeds the "File profile" table.
     """
     subject = (
         f"MatchBot SUCCESS: {provider_code} "
         f"({rows_matched}/{rows_staged} matched, {match_rate:.1%})"
     )
     total_rows = rows_landed + rows_rejected
-    null_lines = "\\n".join(
-        f"  {col}: {count} ({(count / rows_landed):.1%})" if rows_landed else f"  {col}: {count}"
-        for col, count in null_counts
-    )
-    body = (
-        f"Run: {run_uid}\\n"
-        f"File: {file_path}\\n"
-        f"Provider: {provider_code}\\n"
-        f"Matched on: {', '.join(matched_on) if matched_on else '-'}\\n"
-        f"Rows in file: {total_rows}\\n"
-        f"Rows rejected: {rows_rejected}\\n"
-        f"Rows staged: {rows_staged}\\n"
-        f"Rows matched: {rows_matched}\\n"
-        f"Rows unmatched: {rows_unmatched}\\n"
-        f"Match rate: {match_rate:.1%}\\n"
-        f"Reference table rows: {reference_row_count}\\n"
-        f"Duration (s): {duration_seconds:.2f}\\n"
-        f"\\n"
-        f"File profile — as received:\\n"
-        f"  Total rows: {rows_landed}\\n"
-        f"  Total columns: {total_columns}\\n"
-        f"  Duplicate rows: {duplicate_row_count}\\n"
-        f"  Null / blank counts by column:\\n"
-        f"{null_lines}"
-    )
+    summary_rows = [
+        _row_html("Run", run_uid),
+        _row_html("File", file_path),
+        _row_html("Provider", provider_code),
+        _row_html("Matched on", ", ".join(matched_on) if matched_on else "-"),
+        _row_html("Rows in file", str(total_rows)),
+        _row_html("Rows rejected", str(rows_rejected)),
+        _row_html("Rows staged", str(rows_staged)),
+        _row_html("Rows matched", str(rows_matched)),
+        _row_html("Rows unmatched", str(rows_unmatched)),
+        _row_html("Match rate", f"{match_rate:.1%}"),
+        _row_html("Reference table rows", str(reference_row_count)),
+        _row_html("Duration (s)", f"{duration_seconds:.2f}"),
+    ]
+    body = f"""\
+<html>
+  <body style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222;">
+    <h2 style="margin-bottom:4px;">MatchBot run summary</h2>
+    <table style="border-collapse:collapse;margin-bottom:16px;">
+      {"".join(summary_rows)}
+    </table>
+    {_file_profile_html(total_columns, duplicate_row_count, rows_landed, null_counts)}
+  </body>
+</html>"""
     return (
         f"CALL SYSTEM$SEND_EMAIL("
         f"'{NOTIFICATION_INTEGRATION}', "
         f"'{RECIPIENTS}', "
         f"'{_escape(subject)}', "
-        f"'{_escape(body)}')"
+        f"'{_escape(body)}', "
+        f"'text/html')"
     )
 
 
@@ -149,13 +206,27 @@ def render_failure_email_sql(
     error_message: str,
     run_uid: str,
 ) -> str:
-    """CALL SYSTEM$SEND_EMAIL(...) for a failed run."""
+    """CALL SYSTEM$SEND_EMAIL(...) for a failed run, HTML body."""
     subject = f"MatchBot FAILED: {file_path}"
-    body = f"Run: {run_uid}\\nFile: {file_path}\\nError: {error_message}"
+    rows = [
+        _row_html("Run", run_uid),
+        _row_html("File", file_path),
+        _row_html("Error", error_message),
+    ]
+    body = f"""\
+<html>
+  <body style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222;">
+    <h2 style="margin-bottom:4px;color:#b00020;">MatchBot run FAILED</h2>
+    <table style="border-collapse:collapse;margin-bottom:16px;">
+      {"".join(rows)}
+    </table>
+  </body>
+</html>"""
     return (
         f"CALL SYSTEM$SEND_EMAIL("
         f"'{NOTIFICATION_INTEGRATION}', "
         f"'{RECIPIENTS}', "
         f"'{_escape(subject)}', "
-        f"'{_escape(body)}')"
+        f"'{_escape(body)}', "
+        f"'text/html')"
     )

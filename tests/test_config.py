@@ -46,6 +46,84 @@ def test_unknown_attribute_in_mapping_fails(tmp_path: Path) -> None:
         load_config(cfg)
 
 
+def test_combined_columns_target_must_be_canonical(tmp_path: Path) -> None:
+    cfg = tmp_path / "config"
+    (cfg / "providers").mkdir(parents=True)
+    global_yaml = {
+        "canonical_attributes": _CANON,
+        "matching": {
+            "matchers": [{"name": "d", "type": "deterministic", "keys": ["ssn"]}]
+        },
+    }
+    (cfg / "global.yaml").write_text(yaml.safe_dump(global_yaml))
+    bad_provider = {
+        "provider_id": "p",
+        "display_name": "P",
+        "format": "csv",
+        "file_glob": "p_*.csv",
+        "combined_columns": {
+            "not_a_real_attribute": {"from_columns": ["A", "B"]},
+        },
+    }
+    (cfg / "providers" / "p.yaml").write_text(yaml.safe_dump(bad_provider))
+
+    with pytest.raises(ConfigError, match="not a canonical attribute"):
+        load_config(cfg)
+
+
+def test_combined_columns_and_column_mappings_cannot_both_target_the_same_attribute(
+    tmp_path: Path,
+) -> None:
+    cfg = tmp_path / "config"
+    (cfg / "providers").mkdir(parents=True)
+    global_yaml = {
+        "canonical_attributes": _CANON,
+        "matching": {
+            "matchers": [{"name": "d", "type": "deterministic", "keys": ["ssn"]}]
+        },
+    }
+    (cfg / "global.yaml").write_text(yaml.safe_dump(global_yaml))
+    bad_provider = {
+        "provider_id": "p",
+        "display_name": "P",
+        "format": "csv",
+        "file_glob": "p_*.csv",
+        "column_mappings": {"STREET_NUMBER": "address1"},
+        "combined_columns": {
+            "address1": {"from_columns": ["STREET_NUMBER", "STREET_NAME"]},
+        },
+    }
+    (cfg / "providers" / "p.yaml").write_text(yaml.safe_dump(bad_provider))
+
+    with pytest.raises(ConfigError, match="ambiguous"):
+        load_config(cfg)
+
+
+def test_combined_columns_requires_at_least_two_source_columns(tmp_path: Path) -> None:
+    cfg = tmp_path / "config"
+    (cfg / "providers").mkdir(parents=True)
+    global_yaml = {
+        "canonical_attributes": _CANON,
+        "matching": {
+            "matchers": [{"name": "d", "type": "deterministic", "keys": ["ssn"]}]
+        },
+    }
+    (cfg / "global.yaml").write_text(yaml.safe_dump(global_yaml))
+    bad_provider = {
+        "provider_id": "p",
+        "display_name": "P",
+        "format": "csv",
+        "file_glob": "p_*.csv",
+        "combined_columns": {
+            "address1": {"from_columns": ["STREET_NUMBER"]},
+        },
+    }
+    (cfg / "providers" / "p.yaml").write_text(yaml.safe_dump(bad_provider))
+
+    with pytest.raises(ConfigError, match="needs 2\\+ from_columns"):
+        load_config(cfg)
+
+
 def test_fixed_width_requires_columns(tmp_path: Path) -> None:
     cfg = tmp_path / "config"
     (cfg / "providers").mkdir(parents=True)

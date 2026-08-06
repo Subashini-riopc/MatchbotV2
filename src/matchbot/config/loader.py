@@ -146,6 +146,22 @@ def _validate_cross_references(app: AppConfig) -> None:
                 errors.append(
                     f"provider {pid!r}: column {col!r} maps to unknown attribute {attr!r}"
                 )
+        for attr, spec in prov.combined_columns.items():
+            if attr not in CANONICAL_NAMES:
+                errors.append(
+                    f"provider {pid!r}: combined_columns target {attr!r} is not a "
+                    "canonical attribute"
+                )
+            if attr in prov.column_mappings.values():
+                errors.append(
+                    f"provider {pid!r}: {attr!r} is declared in both column_mappings "
+                    "and combined_columns — ambiguous which one wins"
+                )
+            if len(spec.from_columns) < 2:
+                errors.append(
+                    f"provider {pid!r}: combined_columns {attr!r} needs 2+ from_columns "
+                    "(a single column belongs in column_mappings instead)"
+                )
         for attr in prov.transforms:
             if attr not in CANONICAL_NAMES:
                 errors.append(f"provider {pid!r}: transform for unknown attribute {attr!r}")

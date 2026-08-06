@@ -177,6 +177,20 @@ def test_file_type_from_filename_handles_full_path() -> None:
     assert file_type_from_filename("risos_voter/Voter_032026.txt") == "VOTER"
 
 
+def test_file_type_from_filename_strips_sample_size_suffix() -> None:
+    """Regression test for a real bug: the trailing-suffix regex only
+    matched PURELY numeric segments, so Voter_032026_100k.txt/_10k.txt/
+    _1k.txt (this session's generated test-sample files) each produced
+    their OWN land table (RISOS_VOTER_032026_100K_LAND etc.) instead of
+    collapsing into the shared RISOS_VOTER_LAND like the full
+    Voter_032026.txt correctly does — caught live via three stray land
+    tables that shouldn't have existed."""
+    assert file_type_from_filename("Voter_032026_100k.txt") == "VOTER"
+    assert file_type_from_filename("Voter_032026_10k.txt") == "VOTER"
+    assert file_type_from_filename("Voter_032026_1k.txt") == "VOTER"
+    assert file_type_from_filename("ride_enrollment_100k.csv") == "RIDE_ENROLLMENT"
+
+
 def test_land_table_name_without_file_type_is_unchanged() -> None:
     """RIDE (multi_file=False) must keep its exact existing table name —
     no suffix, no rename of an already-deployed table."""

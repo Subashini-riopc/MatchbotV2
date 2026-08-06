@@ -17,7 +17,11 @@ CREATE TABLE IF NOT EXISTS RILDS_MATCHED (
     stage_id               NUMBER NOT NULL,          -- FK -> RILDS_STAGE.id
     idcol_id               NUMBER NOT NULL,          -- FK -> RILDS_REFERENCE.idcol_id
     match_score            NUMBER(5, 4) NOT NULL,
-    match_method           VARCHAR(20) NOT NULL,     -- EXACT_SASID / EXACT / ...
+    -- The matcher's own config/global.yaml name verbatim (e.g.
+    -- 'deterministic_name_dob', 'fuzzy_name_addr_combined'), not a coarse
+    -- EXACT/EXACT_SASID/FUZZY bucket — VARCHAR(50) since the longest
+    -- current matcher name is 34 chars (deterministic_name_addr_city_state).
+    match_method           VARCHAR(50) NOT NULL,
 
     first_name             VARCHAR(52),
     middle_name            VARCHAR(50),
@@ -44,6 +48,13 @@ CREATE TABLE IF NOT EXISTS RILDS_MATCHED (
     matched_at             TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
     matched_by             VARCHAR(100) DEFAULT 'system'
 );
+
+-- match_method widened from VARCHAR(20) (the old coarse EXACT/EXACT_SASID/
+-- FUZZY bucket) to VARCHAR(50) to hold the full matcher name verbatim —
+-- CREATE TABLE IF NOT EXISTS above is a no-op against an already-deployed
+-- table, so this ALTER is what actually widens it. Existing rows keep
+-- whatever value they already have (old coarse labels are not rewritten).
+ALTER TABLE RILDS_MATCHED ALTER COLUMN match_method SET DATA TYPE VARCHAR(50);
 
 CREATE TABLE IF NOT EXISTS RILDS_ERROR (
     id                     NUMBER IDENTITY PRIMARY KEY,

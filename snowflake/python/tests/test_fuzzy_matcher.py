@@ -146,9 +146,97 @@ def test_real_config_fuzzy_matchers_all_build_without_error() -> None:
     to this file's unit tests above."""
     app_config = load_config(CONFIG_DIR)
     fragments = build_sql_fragments(app_config.global_config.matching.matchers, "sasid")
-    fuzzy_fragments = [f for f in fragments if f.method_label == "FUZZY"]
-    assert len(fuzzy_fragments) == 3
+    # method_label is now the matcher's own name (not a coarse "FUZZY"
+    # bucket) — identify fuzzy fragments by name prefix instead, matching
+    # config/global.yaml's own naming convention.
+    fuzzy_fragments = [f for f in fragments if f.name.startswith("fuzzy_")]
+    assert len(fuzzy_fragments) == 2
     for fragment in fuzzy_fragments:
         assert fragment.score_sql not in ("1.0", "0.0")
         assert 0.0 < fragment.accept_threshold <= 1.0
         assert 0.0 < fragment.review_threshold <= fragment.accept_threshold
+
+
+# --- required=true: folded into join_predicate_sql as a hard AND condition -
+# See matchers/fuzzy.py's module docstring / config/models.py's
+# FieldComparison.required docstring for the full rationale: weight=0 alone
+# does NOT gate a candidate out of the SQL join, it only means the field
+# doesn't contribute to score_sql — required=true is what actually excludes
+# a non-matching candidate from the join itself.
+
+
+def test_required_non_anchor_field_is_anded_into_the_join() -> None:
+    """A required=true field that ISN'T the exact-anchor (first_name_std
+    here is the anchor; zip is a second required field) must still appear
+    as an extra AND condition in join_predicate_sql — not silently dropped
+    just because it's not the field _find_exact_anchor() picked."""
+    spec = _spec(
+        "fuzzy_required_test",
+        [
+            FieldComparison(attribute="first_name_std", method="exact", weight=0, threshold=1.0, required=True),
+            FieldComparison(attribute="zip5", method="exact", weight=0, threshold=1.0, required=True),
+            FieldComparison(attribute="address1_std", method="jaro_winkler", weight=100, threshold=0.90),
+        ],
+    )
+    fragment = build_fuzzy_fragment(spec, external_id_column="sasid")
+
+    # The anchor (first_name_std) is the base equality.
+    assert "s.first_name_std" in fragment.join_predicate_sql
+    assert "r.first_name_std" in fragment.join_predicate_sql
+    # zip5's required condition is AND-ed in, even though it's not the anchor.
+    assert " AND " in fragment.join_predicate_sql
+    assert "s.zip5" in fragment.join_predicate_sql
+    assert "r.zip5" in fragment.join_predicate_sql
+
+
+def test_required_field_that_is_also_the_anchor_is_not_duplicated() -> None:
+    """The anchor field itself, if also marked required=true, must not
+    produce a redundant duplicate AND condition — its equality is already
+    the join_predicate_sql base."""
+    spec = _spec(
+        "fuzzy_required_anchor_test",
+        [
+            FieldComparison(attribute="first_name_std", method="exact", weight=0, threshold=1.0, required=True),
+            FieldComparison(attribute="address1_std", method="jaro_winkler", weight=100, threshold=0.90),
+        ],
+    )
+    fragment = build_fuzzy_fragment(spec, external_id_column="sasid")
+
+    # first_name_std appears exactly once as an equality (the anchor),
+    # not twice (anchor + redundant required AND).
+    assert fragment.join_predicate_sql.count("s.first_name_std") == 1
+
+
+def test_required_field_uses_similarity_threshold_not_bare_equality() -> None:
+    """A required jaro_winkler field (not exact) must be folded in as a
+    '>= threshold' condition using the real similarity SQL, not a plain
+    equality — required works for any comparison method, not just exact."""
+    spec = _spec(
+        "fuzzy_required_fuzzy_field_test",
+        [
+            FieldComparison(attribute="first_name_std", method="exact", weight=0, threshold=1.0, required=True),
+            FieldComparison(
+                attribute="last_name_std", method="jaro_winkler", weight=0, threshold=0.90, required=True
+            ),
+            FieldComparison(attribute="address1_std", method="jaro_winkler", weight=100, threshold=0.90),
+        ],
+    )
+    fragment = build_fuzzy_fragment(spec, external_id_column="sasid")
+
+    assert "MATCHBOT_JARO_WINKLER" in fragment.join_predicate_sql
+    assert ">= 0.9" in fragment.join_predicate_sql
+
+
+def test_no_required_fields_leaves_join_predicate_unchanged() -> None:
+    """A matcher with no required=true fields at all must produce exactly
+    the same join_predicate_sql as before this feature existed — no
+    accidental AND conditions appended."""
+    spec = _spec(
+        "fuzzy_no_required_test",
+        [
+            FieldComparison(attribute="first_name_std", method="exact", weight=50, threshold=1.0),
+            FieldComparison(attribute="address1_std", method="jaro_winkler", weight=50, threshold=0.90),
+        ],
+    )
+    fragment = build_fuzzy_fragment(spec, external_id_column="sasid")
+    assert " AND " not in fragment.join_predicate_sql

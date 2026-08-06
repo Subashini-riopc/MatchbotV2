@@ -12,36 +12,58 @@ semantics as SQL:
   as deterministic.py's _norm()) between the staged row and a candidate
   reference row.
 
-All 4 matchers in the current config/global.yaml chain
-(deterministic_external_id, deterministic_ssn, deterministic_name_dob,
-deterministic_name_addr) are this one type — this is the only generator
-needed for the demo's exact-match-parity scope.
+All 6 matchers in the current config/global.yaml chain
+(deterministic_external_id, deterministic_ssn, deterministic_name_ssn4,
+deterministic_name_dob, deterministic_name_addr_city_state, and
+deterministic_name_addr_zip) are this one type.
+deterministic_fn_addr (first_name + address only, no last name) was
+removed as too loose a last-resort tier, then reintroduced as
+deterministic_firstname_addr_state_zip (same key shape), then removed
+again along with deterministic_lastname_addr_state_zip per explicit
+request — both carried real household-collision risk (people sharing a
+last name + address, or a first name + address, could false-match) with
+only state+zip as a narrowing anchor. deterministic_name_addr_full and
+deterministic_name_addr were dropped earlier for the same reasoning.
+deterministic_name_state_zip (first_name_std, last_name_std, state,
+zip5) was then changed to deterministic_name_addr_zip (first_name_std,
+last_name_std, address1_std, zip5 — state swapped for address1_std) per
+explicit request — not part of the current 6-rule chain.
+
+Hash-based joins: for any matcher whose exact key list is registered in
+derive_sql.py's HASH_COLUMN_BY_KEYS (every current matcher with 2+ keys),
+the join collapses to a single s.<hash_col> = r.<hash_col> equality check
+against a column RILDS_STAGE/RILDS_REFERENCE precompute once (see
+provider_sql.py / that table's DDL comments) — instead of the multi-column
+AND chain built here for anything not in that registry (currently just
+deterministic_external_id/deterministic_ssn, both single-key already, so
+hashing has no join-cost benefit and external_id specifically compares
+against a provider-varying reference column that can't be hashed once —
+see external_id_column below). The guard for a hash-based join is just
+"the stage row's hash column is not NULL" — a non-NULL hash already implies
+every underlying key was present (see derive_sql.py's NULL-propagation:
+any missing key makes the whole hash NULL), so there's no need to re-check
+each individual key here.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from matchbot_snowflake.derive_sql import hash_column_for_keys
 from matchbot_snowflake.matcher_registry import _BuiltFragment, register_sql_matcher
 
 if TYPE_CHECKING:
     from matchbot.config.models import MatcherSpec
 
-# method_to_db()'s exact rule (matching/vocab.py): a deterministic matcher
-# whose NAME contains "external_id" or "sasid" reports as EXACT_SASID;
-# every other deterministic matcher reports as plain EXACT. Reproduced
-# verbatim here rather than imported, since vocab.py's function takes a
-# matcher NAME string and a MatchMethod enum — trivial logic, cheaper to
-# mirror than to add a runtime dependency on matchbot's enum module for one
-# string check.
-_SASID_NAME_MARKERS = ("external_id", "sasid")
-
-
+# match_method is the matcher's own config/global.yaml name verbatim
+# (e.g. "deterministic_name_dob", "deterministic_name_addr_full") rather
+# than a coarse EXACT/EXACT_SASID bucket — see matching/vocab.py's
+# method_to_db() on the AWS side for the same change (and the reasoning:
+# collapsing every non-external_id deterministic tier into one "EXACT"
+# label made it impossible to tell which of the 7 rules actually matched
+# a given row from rilds_matched.match_method alone).
 def _method_label(matcher_name: str) -> str:
-    lowered = matcher_name.lower()
-    if any(marker in lowered for marker in _SASID_NAME_MARKERS):
-        return "EXACT_SASID"
-    return "EXACT"
+    return matcher_name
 
 
 # Keys backed by a non-string column type: _norm() (deterministic.py) only
@@ -126,6 +148,26 @@ def build_deterministic_fragment(
         # runs and immediately returns NO_MATCH. Encode that explicitly
         # rather than emit SQL with an empty AND/ON clause.
         return _BuiltFragment("1 = 0", "1 = 0", _method_label(spec.name))
+
+    # rilds_id (deterministic_external_id) is never eligible for a hash
+    # column even if someone added it to HASH_COLUMN_BY_KEYS by mistake:
+    # its reference-side column is provider-varying (external_id_column),
+    # so a single precomputed reference-side hash could never be correct
+    # for every provider at once. Guarded here defensively, though
+    # HASH_COLUMN_BY_KEYS today simply never lists rilds_id/ssn (both
+    # single-key) at all.
+    hash_column = None
+    if _EXTERNAL_ID_KEY not in spec.keys:
+        hash_column = hash_column_for_keys(spec.keys)
+
+    if hash_column is not None:
+        join_conditions = f"s.{hash_column} = r.{hash_column}"
+        # A non-NULL hash already implies every underlying key was present
+        # and non-blank — see derive_sql.py's deterministic_hash_sql, whose
+        # IFF(...) guard makes the whole hash NULL if any key is missing.
+        # No need to re-check each individual key here.
+        guard_conditions = f"s.{hash_column} IS NOT NULL"
+        return _BuiltFragment(join_conditions, guard_conditions, _method_label(spec.name))
 
     def _ref_override(key: str) -> str | None:
         return external_id_column if key == _EXTERNAL_ID_KEY else None
